@@ -358,6 +358,10 @@ static DUMB_IT_SIGRENDERER *dup_sigrenderer(DUMB_IT_SIGRENDERER *src, int n_chan
 
 #ifdef BIT_ARRAY_BULLSHIT
 	dst->played = bit_array_dup(src->played);
+
+	dst->looped = src->looped;
+	dst->time_played = src->time_played;
+	dst->row_timekeeper = timekeeping_array_dup(src->row_timekeeper);
 #endif
 
 	dst->gvz_time = src->gvz_time;
@@ -907,9 +911,9 @@ static void it_pickup_stop_at_end(DUMB_RESAMPLER *resampler, void *data)
 
 static void it_pickup_stop_after_reverse(DUMB_RESAMPLER *resampler, void *data)
 {
-    (void)data;
+	(void)data;
 
-    resampler->dir = 0;
+	resampler->dir = 0;
 }
 
 
@@ -934,13 +938,13 @@ static void it_playing_update_resamplers(IT_PLAYING *playing)
 			playing->resampler.pickup = &it_pickup_pingpong_loop;
 		else
 			playing->resampler.pickup = &it_pickup_loop;
-    } else if (playing->flags & IT_PLAYING_REVERSE) {
-        playing->resampler.start = 0;
-        playing->resampler.end = playing->sample->length;
-        playing->resampler.dir = -1;
-        playing->resampler.pickup = &it_pickup_stop_after_reverse;
-    } else {
-        if (playing->sample->flags & IT_SAMPLE_SUS_LOOP)
+	} else if (playing->flags & IT_PLAYING_REVERSE) {
+		playing->resampler.start = 0;
+		playing->resampler.end = playing->sample->length;
+		playing->resampler.dir = -1;
+		playing->resampler.pickup = &it_pickup_stop_after_reverse;
+	} else {
+		if (playing->sample->flags & IT_SAMPLE_SUS_LOOP)
 			playing->resampler.start = playing->sample->sus_loop_start;
 		else
 			playing->resampler.start = 0;
@@ -1570,7 +1574,6 @@ static void xm_note_off(DUMB_IT_SIGDATA *sigdata, IT_CHANNEL *channel)
 }
 
 
-
 static void it_retrigger_note(DUMB_IT_SIGRENDERER *sigrenderer, IT_CHANNEL *channel)
 {
 	IT_PLAYING_ENVELOPE volume_envelope;
@@ -2063,24 +2066,23 @@ Yxy             This uses a table 4 times larger (hence 4 times slower) than
 					/*if (entry->effectvalue == 255)
 						if (sigrenderer->callbacks->xm_speed_zero && (*sigrenderer->callbacks->xm_speed_zero)(sigrenderer->callbacks->xm_speed_zero_data))
 							return 1;*/
-                    if (sigdata->flags & IT_WAS_AN_STM)
-                    {
-                        int n = entry->effectvalue;
-                        if (n >= 32)
-                        {
-                            sigrenderer->tick = sigrenderer->speed = n;
-                        }
-                    }
-                    else
-                    {
-                        sigrenderer->tick = sigrenderer->speed = entry->effectvalue;
-                    }
+					if (sigdata->flags & IT_WAS_AN_STM) {
+						int n = entry->effectvalue;
+						if (n >= 32) {
+							sigrenderer->tick = sigrenderer->speed = n;
+						}
+					} else {
+						sigrenderer->tick = sigrenderer->speed = entry->effectvalue;
+					}
 				}
 				else if ((sigdata->flags & (IT_WAS_AN_XM|IT_WAS_A_MOD)) == IT_WAS_AN_XM) {
 #ifdef BIT_ARRAY_BULLSHIT
 					bit_array_set(sigrenderer->played, sigrenderer->order * 256 + sigrenderer->row);
 #endif
 					sigrenderer->speed = 0;
+#ifdef BIT_ARRAY_BULLSHIT
+					sigrenderer->looped = 1;
+#endif
 					if (sigrenderer->callbacks->xm_speed_zero && (*sigrenderer->callbacks->xm_speed_zero)(sigrenderer->callbacks->xm_speed_zero_data))
 						return 1;
 				}
@@ -2254,11 +2256,11 @@ Yxy             This uses a table 4 times larger (hence 4 times slower) than
 							playing = sigrenderer->playing[i];
 							if (!playing || playing->channel != channel) continue;
 						}
-                        if (playing) {
+						if (playing) {
 							if ((v & 0xF0) == 0xF0)
-                                playing->slide += (v & 15) << 4;
+								playing->slide += (v & 15) << 4;
 							else if ((v & 0xF0) == 0xE0)
-                                playing->slide += (v & 15) << 2;
+								playing->slide += (v & 15) << 2;
 							else if (i < 0 && sigdata->flags & IT_WAS_A_669)
 								channel->portamento += v << 3;
 							else if (i < 0)
@@ -2581,7 +2583,7 @@ Yxy             This uses a table 4 times larger (hence 4 times slower) than
 					}
 				}
 				break;
-            case IT_S:
+			case IT_S:
 				{
 					/* channel->lastS was set in update_pattern_variables(). */
 					unsigned char effectvalue = channel->lastS;
@@ -2741,13 +2743,13 @@ Yxy             This uses a table 4 times larger (hence 4 times slower) than
 								channel->playing->panbrello_depth = 0;
 							break;
 						case IT_S_SET_SURROUND_SOUND:
-                            if ((effectvalue & 15) == 15) {
-                                if (channel->playing && channel->playing->sample &&
-                                    !(channel->playing->sample->flags & (IT_SAMPLE_LOOP | IT_SAMPLE_SUS_LOOP))) {
-                                    channel->playing->flags |= IT_PLAYING_REVERSE;
-                                    it_playing_reset_resamplers( channel->playing, channel->playing->sample->length - 1 );
-                                }
-                            } else if ((effectvalue & 15) == 1) {
+							if ((effectvalue & 15) == 15) {
+								if (channel->playing && channel->playing->sample &&
+									!(channel->playing->sample->flags & (IT_SAMPLE_LOOP | IT_SAMPLE_SUS_LOOP))) {
+									channel->playing->flags |= IT_PLAYING_REVERSE;
+									it_playing_reset_resamplers( channel->playing, channel->playing->sample->length - 1 );
+								}
+							} else if ((effectvalue & 15) == 1) {
 								channel->pan = IT_SURROUND;
 								channel->truepan = channel->pan << IT_ENVELOPE_SHIFT;
 							}
@@ -4251,6 +4253,9 @@ static int process_tick(DUMB_IT_SIGRENDERER *sigrenderer)
 					&& bit_array_test(sigrenderer->played, sigrenderer->processorder * 256 + sigrenderer->processrow)
 #endif
 					) {
+#ifdef BIT_ARRAY_BULLSHIT
+					sigrenderer->looped = 1;
+#endif
 					if (sigrenderer->callbacks->loop) {
 						if ((*sigrenderer->callbacks->loop)(sigrenderer->callbacks->loop_data))
 							return 1;
@@ -4294,6 +4299,13 @@ static int process_tick(DUMB_IT_SIGRENDERER *sigrenderer)
 				}
 			}
 
+#ifdef BIT_ARRAY_BULLSHIT
+			if (sigrenderer->looped == 0) {
+				timekeeping_array_push(sigrenderer->row_timekeeper, sigrenderer->order * 256 + sigrenderer->row, sigrenderer->time_played);
+			}
+			timekeeping_array_bump(sigrenderer->row_timekeeper, sigrenderer->order * 256 + sigrenderer->row);
+#endif
+
 			if (!(sigdata->flags & IT_WAS_A_669))
 				reset_effects(sigrenderer);
 
@@ -4332,12 +4344,11 @@ static int process_tick(DUMB_IT_SIGRENDERER *sigrenderer)
 			update_effects(sigrenderer);
 		}
 	} else {
-        if ( !(sigdata->flags & IT_WAS_AN_STM) || !(sigrenderer->tick & 15))
-        {
-            speed0:
-            update_effects(sigrenderer);
-            update_tick_counts(sigrenderer);
-        }
+		if ( !(sigdata->flags & IT_WAS_AN_STM) || !(sigrenderer->tick & 15)) {
+			speed0:
+			update_effects(sigrenderer);
+			update_tick_counts(sigrenderer);
+		}
 	}
 
 	if (sigrenderer->globalvolume == 0) {
@@ -4346,6 +4357,9 @@ static int process_tick(DUMB_IT_SIGRENDERER *sigrenderer)
 			sigrenderer->gvz_time += (int)(t >> 16);
 			sigrenderer->gvz_sub_time = (int)t & 65535;
 			if (sigrenderer->gvz_time >= 65536 * 12) {
+#ifdef BIT_ARRAY_BULLSHIT
+				sigrenderer->looped = 1;
+#endif
 				if ((*sigrenderer->callbacks->global_volume_zero)(sigrenderer->callbacks->global_volume_zero_data))
 					return 1;
 			}
@@ -4360,12 +4374,11 @@ static int process_tick(DUMB_IT_SIGRENDERER *sigrenderer)
 	process_all_playing(sigrenderer);
 
 	{
-        LONG_LONG t = ((LONG_LONG)TICK_TIME_DIVIDEND << 16) / sigrenderer->tempo;
-        if ( sigrenderer->sigdata->flags & IT_WAS_AN_STM )
-        {
-            t /= 16;
-        }
-        t += sigrenderer->sub_time_left;
+		LONG_LONG t = ((LONG_LONG)TICK_TIME_DIVIDEND << 16) / sigrenderer->tempo;
+		if ( sigrenderer->sigdata->flags & IT_WAS_AN_STM ) {
+			t /= 16;
+		}
+		t += sigrenderer->sub_time_left;
 		sigrenderer->time_left += (int)(t >> 16);
 		sigrenderer->sub_time_left = (int)t & 65535;
 	}
@@ -5298,6 +5311,10 @@ static DUMB_IT_SIGRENDERER *init_sigrenderer(DUMB_IT_SIGDATA *sigdata, int n_cha
 
 #ifdef BIT_ARRAY_BULLSHIT
 	sigrenderer->played = bit_array_create(sigdata->n_orders * 256);
+
+	sigrenderer->looped = 0;
+	sigrenderer->time_played = 0;
+	sigrenderer->row_timekeeper = timekeeping_array_create(sigdata->n_orders * 256);
 #endif
 
 	sigrenderer->gvz_time = 0;
@@ -5448,6 +5465,10 @@ static sigrenderer_t *it_start_sigrenderer(DUH *duh, sigdata_t *vsigdata, int n_
 	while (pos > 0 && pos >= sigrenderer->time_left) {
 		render(sigrenderer, 0, 1.0f, 0, sigrenderer->time_left, NULL);
 
+#ifdef BIT_ARRAY_BULLSHIT
+		sigrenderer->time_played += (LONG_LONG)sigrenderer->time_left << 16;
+#endif
+
 		pos -= sigrenderer->time_left;
 		sigrenderer->time_left = 0;
 
@@ -5459,6 +5480,10 @@ static sigrenderer_t *it_start_sigrenderer(DUH *duh, sigdata_t *vsigdata, int n_
 
 	render(sigrenderer, 0, 1.0f, 0, pos, NULL);
 	sigrenderer->time_left -= pos;
+
+#ifdef BIT_ARRAY_BULLSHIT
+	sigrenderer->time_played += (LONG_LONG)pos << 16;
+#endif
 
 	return sigrenderer;
 }
@@ -5475,6 +5500,7 @@ static int32 it_sigrenderer_get_samples(
 	int32 pos;
 	int dt;
 	int32 todo;
+	int ret;
 	LONG_LONG t;
 
 	if (sigrenderer->order < 0) return 0; // problematic
@@ -5502,9 +5528,28 @@ static int32 it_sigrenderer_get_samples(
 		sigrenderer->sub_time_left = (int32)t & 65535;
 		sigrenderer->time_left += (int32)(t >> 16);
 
-		if (process_tick(sigrenderer)) {
+#ifdef BIT_ARRAY_BULLSHIT
+		sigrenderer->time_played += (LONG_LONG)todo * dt;
+#endif
+
+		ret = process_tick(sigrenderer);
+
+		if (ret) {
 			sigrenderer->order = -1;
 			sigrenderer->row = -1;
+		}
+
+#ifdef BIT_ARRAY_BULLSHIT
+		if (sigrenderer->looped == 1) {
+			sigrenderer->looped = -1;
+			size = 0;
+			timekeeping_array_reset(sigrenderer->row_timekeeper, sigrenderer->order * 256 + sigrenderer->row);
+			sigrenderer->time_played = timekeeping_array_get_item(sigrenderer->row_timekeeper, sigrenderer->order * 256 + sigrenderer->row);
+			break;
+		}
+#endif
+
+		if (ret) {
 			return pos;
 		}
 	}
@@ -5516,6 +5561,10 @@ static int32 it_sigrenderer_get_samples(
 	t = sigrenderer->sub_time_left - (LONG_LONG)size * dt;
 	sigrenderer->sub_time_left = (int32)t & 65535;
 	sigrenderer->time_left += (int32)(t >> 16);
+
+#ifdef BIT_ARRAY_BULLSHIT
+	sigrenderer->time_played += (LONG_LONG)size * dt;
+#endif
 
 	if (samples)
 		dumb_remove_clicks_array(sigrenderer->n_channels, sigrenderer->click_remover, samples, pos, 512.0f / delta);
@@ -5568,11 +5617,24 @@ void _dumb_it_end_sigrenderer(sigrenderer_t *vsigrenderer)
 
 #ifdef BIT_ARRAY_BULLSHIT
 		bit_array_destroy(sigrenderer->played);
+
+		timekeeping_array_destroy(sigrenderer->row_timekeeper);
 #endif
 
 		free(vsigrenderer);
 	}
 }
+
+
+
+#ifdef BIT_ARRAY_BULLSHIT
+static long it_sigrenderer_get_position(sigrenderer_t *vsigrenderer)
+{
+	DUMB_IT_SIGRENDERER *sigrenderer = vsigrenderer;
+
+	return (long)(sigrenderer->time_played >> 16);
+}
+#endif
 
 
 
@@ -5583,6 +5645,11 @@ DUH_SIGTYPE_DESC _dumb_sigtype_it = {
 	NULL,
 	&it_sigrenderer_get_samples,
 	&it_sigrenderer_get_current_sample,
+#ifdef BIT_ARRAY_BULLSHIT
+	&it_sigrenderer_get_position,
+#else
+	NULL,
+#endif
 	&_dumb_it_end_sigrenderer,
 	&_dumb_it_unload_sigdata
 };
@@ -5902,7 +5969,8 @@ int DUMBEXPORT dumb_it_scan_for_playable_orders(DUMB_IT_SIGDATA *sigdata, dumb_s
 	ba_played = bit_array_create(sigdata->n_orders * 256);
 	if (!ba_played) return -1;
 
-	for (n = 0; n < sigdata->n_orders; n++) {
+	/* Skip the first order, it should always be played */
+	for (n = 1; n < sigdata->n_orders; n++) {
 		if ((sigdata->order[n] >= sigdata->n_patterns) ||
 			(is_pattern_silent(&sigdata->pattern[sigdata->order[n]], n) > 1))
 			bit_array_set(ba_played, n * 256);

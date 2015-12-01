@@ -300,7 +300,7 @@ static DUMB_IT_SIGDATA *it_riff_amff_load_sigdata( struct riff * stream )
 
 		case DUMB_ID( 'I', 'N', 'S', 'T' ):
 			{
-				if ( c->size < 0xE1 ) goto error;
+				if ( c->size < 0xE1 ) goto error_sd;
 				ptr = ( unsigned char * ) c->data;
 				if ( ptr[ 1 ] >= sigdata->n_samples ) sigdata->n_samples = ptr[ 1 ] + 1;
 				if ( c->size >= 0x121 && ( ptr[ 0xE1 ] == 'S' && ptr[ 0xE2 ] == 'A' &&

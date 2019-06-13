@@ -41,17 +41,17 @@ const char *GetVersionString();
 
 /** Lots of different version numbers **/
 
-#define VERSIONSTR "2.8pre"
+#define VERSIONSTR "2.9pre"
 
 // The version as seen in the Windows resource
-#define RC_FILEVERSION 2,7,9999,0
-#define RC_PRODUCTVERSION 2,7,9999,0
-#define RC_PRODUCTVERSION2 "2.8pre"
+#define RC_FILEVERSION 2,8,9999,0
+#define RC_PRODUCTVERSION 2,8,9999,0
+#define RC_PRODUCTVERSION2 "2.9pre"
 
 // Version identifier for network games.
 // Bump it every time you do a release unless you're certain you
 // didn't change anything that will affect sync.
-#define NETGAMEVERSION 231
+#define NETGAMEVERSION 232
 
 // Version stored in the ini's [LastRun] section.
 // Bump it if you made some configuration change that you want to
@@ -61,26 +61,25 @@ const char *GetVersionString();
 // Protocol version used in demos.
 // Bump it if you change existing DEM_ commands or add new ones.
 // Otherwise, it should be safe to leave it alone.
-#define DEMOGAMEVERSION 0x21C
+#define DEMOGAMEVERSION 0x21E
 
 // Minimum demo version we can play.
 // Bump it whenever you change or remove existing DEM_ commands.
-#define MINDEMOVERSION 0x21C
+#define MINDEMOVERSION 0x21E
 
 // SAVEVER is the version of the information stored in level snapshots.
 // Note that SAVEVER is not directly comparable to VERSION.
 // SAVESIG should match SAVEVER.
 
+// extension for savegames
+#define SAVEGAME_EXT "zds"
+
 // MINSAVEVER is the minimum level snapshot version that can be loaded.
-#define MINSAVEVER	3100
+#define MINSAVEVER	4550
 
 // Use 4500 as the base git save version, since it's higher than the
 // SVN revision ever got.
-#define SAVEVER 4531
-
-#define SAVEVERSTRINGIFY2(x) #x
-#define SAVEVERSTRINGIFY(x) SAVEVERSTRINGIFY2(x)
-#define SAVESIG "ZDOOMSAVE" SAVEVERSTRINGIFY(SAVEVER)
+#define SAVEVER 4550
 
 // This is so that derivates can use the same savegame versions without worrying about engine compatibility
 #define GAMESIG "ZDOOM"

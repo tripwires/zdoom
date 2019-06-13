@@ -39,29 +39,24 @@
 #include "v_video.h"
 #include "cmdlib.h"
 #include "doomstat.h"
-#include "farchive.h"
+#include "serializer.h"
 
-EXTERN_CVAR (Int, con_scaletext)
+EXTERN_CVAR(Int, con_scaletext)
+int active_con_scaletext();
 
-IMPLEMENT_POINTY_CLASS (DHUDMessage)
- DECLARE_POINTER(Next)
-END_POINTERS
+IMPLEMENT_CLASS(DHUDMessage, false, true)
 
-IMPLEMENT_CLASS (DHUDMessageFadeOut)
-IMPLEMENT_CLASS (DHUDMessageFadeInOut)
-IMPLEMENT_CLASS (DHUDMessageTypeOnFadeOut)
+IMPLEMENT_POINTERS_START(DHUDMessage)
+	IMPLEMENT_POINTER(Next)
+IMPLEMENT_POINTERS_END
+
+IMPLEMENT_CLASS(DHUDMessageFadeOut, false, false)
+IMPLEMENT_CLASS(DHUDMessageFadeInOut, false, false)
+IMPLEMENT_CLASS(DHUDMessageTypeOnFadeOut, false, false)
 
 /*************************************************************************
  * Basic HUD message. Appears and disappears without any special effects *
  *************************************************************************/
-
-inline FArchive &operator<< (FArchive &arc, EColorRange &i)
-{
-	BYTE val = (BYTE)i;
-	arc << val;
-	i = (EColorRange)val;
-	return arc;
-}
 
 //============================================================================
 //
@@ -146,7 +141,7 @@ DHUDMessage::DHUDMessage (FFont *font, const char *text, float x, float y, int h
 	Font = font;
 	VisibilityFlags = 0;
 	Style = STYLE_Translucent;
-	Alpha = FRACUNIT;
+	Alpha = 1.;
 	ResetText (SourceText);
 }
 
@@ -179,53 +174,37 @@ DHUDMessage::~DHUDMessage ()
 //
 //============================================================================
 
-void DHUDMessage::Serialize (FArchive &arc)
+void DHUDMessage::Serialize(FSerializer &arc)
 {
-	Super::Serialize (arc);
-	arc << Left << Top << CenterX << HoldTics
-		<< Tics << State << TextColor
-		<< SBarID << SourceText << Font << Next
-		<< HUDWidth << HUDHeight;
-	if (SaveVersion >= 3960)
-	{
-		 arc << NoWrap;
-		 arc << ClipX << ClipY << ClipWidth << ClipHeight;
-		 arc << WrapWidth;
-	}
-	else
-	{
-		NoWrap = false;
-		ClipX = ClipY = ClipWidth = ClipHeight = WrapWidth = 0;
-	}
-	if (SaveVersion >= 4525)
-	{
-		arc << HandleAspect;
-	}
-	else
-	{
-		HandleAspect = true;
-	}
-	if (arc.IsLoading ())
+	Super::Serialize(arc);
+	arc("left", Left)
+		("top", Top)
+		("centerx", CenterX)
+		("holdtics", HoldTics)
+		("tics", Tics)
+		("state", State)
+		.Enum("textcolor", TextColor)
+		("sbarid", SBarID)
+		("sourcetext", SourceText)
+		("font", Font)
+		("next", Next)
+		("hudwidth", HUDWidth)
+		("hudheight", HUDHeight)
+		("nowrap", NoWrap)
+		("clipx", ClipX)
+		("clipy", ClipY)
+		("clipwidth", ClipWidth)
+		("clipheight", ClipHeight)
+		("wrapwidth", WrapWidth)
+		("handleaspect", HandleAspect)
+		("visibilityflags", VisibilityFlags)
+		("style", Style)
+		("alpha", Alpha);
+
+	if (arc.isReading())
 	{
 		Lines = NULL;
-		ResetText (SourceText);
-	}
-	if (SaveVersion < 3821)
-	{
-		VisibilityFlags = 0;
-	}
-	else
-	{
-		arc << VisibilityFlags;
-	}
-	if (SaveVersion < 3824)
-	{
-		Style = STYLE_Translucent;
-		Alpha = FRACUNIT;
-	}
-	else
-	{
-		arc << Style << Alpha;
+		ResetText(SourceText);
 	}
 }
 
@@ -290,7 +269,11 @@ void DHUDMessage::ResetText (const char *text)
 	}
 	else
 	{
-		width = con_scaletext >= 2 ? SCREENWIDTH/2 : (con_scaletext ? SCREENWIDTH / CleanXfac : SCREENWIDTH); 
+		switch (active_con_scaletext())
+		{
+		case 0: width = SCREENWIDTH / CleanXfac; break;
+		default: width = SCREENWIDTH / active_con_scaletext(); break;
+		}
 	}
 
 	if (Lines != NULL)
@@ -355,7 +338,7 @@ void DHUDMessage::Draw (int bottom, int visibility)
 
 	int screen_width = SCREENWIDTH;
 	int screen_height = SCREENHEIGHT;
-	if (HUDWidth == 0 && con_scaletext==1)
+	if (HUDWidth == 0 && active_con_scaletext() == 0)
 	{
 		clean = true;
 		xscale = CleanXfac;
@@ -364,11 +347,11 @@ void DHUDMessage::Draw (int bottom, int visibility)
 	else
 	{
 		xscale = yscale = 1;
-		if (HUDWidth==0 && con_scaletext>1) 
+		if (HUDWidth == 0)
 		{
-			screen_width/=2;
-			screen_height/=2;
-			bottom/=2;
+			screen_width /= active_con_scaletext();
+			screen_height /= active_con_scaletext();
+			bottom /= active_con_scaletext();
 		}
 	}
 
@@ -470,20 +453,20 @@ void DHUDMessage::DoDraw (int linenum, int x, int y, bool clean, int hudheight)
 {
 	if (hudheight == 0)
 	{
-		if (con_scaletext <= 1)
+		if (active_con_scaletext() <= 1)
 		{
 			screen->DrawText (Font, TextColor, x, y, Lines[linenum].Text,
 				DTA_CleanNoMove, clean,
-				DTA_Alpha, Alpha,
+				DTA_AlphaF, Alpha,
 				DTA_RenderStyle, Style,
 				TAG_DONE);
 		}
 		else
 		{
 			screen->DrawText (Font, TextColor, x, y, Lines[linenum].Text,
-				DTA_VirtualWidth, SCREENWIDTH/2,
-				DTA_VirtualHeight, SCREENHEIGHT/2,
-				DTA_Alpha, Alpha,
+				DTA_VirtualWidth, SCREENWIDTH / active_con_scaletext(),
+				DTA_VirtualHeight, SCREENHEIGHT / active_con_scaletext(),
+				DTA_AlphaF, Alpha,
 				DTA_RenderStyle, Style,
 				DTA_KeepRatio, true,
 				TAG_DONE);
@@ -498,7 +481,7 @@ void DHUDMessage::DoDraw (int linenum, int x, int y, bool clean, int hudheight)
 			DTA_ClipRight, ClipRight,
 			DTA_ClipTop, ClipTop,
 			DTA_ClipBottom, ClipBot,
-			DTA_Alpha, Alpha,
+			DTA_AlphaF, Alpha,
 			DTA_RenderStyle, Style,
 			TAG_DONE);
 	}
@@ -529,10 +512,10 @@ DHUDMessageFadeOut::DHUDMessageFadeOut (FFont *font, const char *text, float x, 
 //
 //============================================================================
 
-void DHUDMessageFadeOut::Serialize (FArchive &arc)
+void DHUDMessageFadeOut::Serialize(FSerializer &arc)
 {
 	Super::Serialize (arc);
-	arc << FadeOutTics;
+	arc("fadeouttics", FadeOutTics);
 }
 
 //============================================================================
@@ -570,24 +553,23 @@ void DHUDMessageFadeOut::DoDraw (int linenum, int x, int y, bool clean, int hudh
 	}
 	else
 	{
-		fixed_t trans = -(Tics - FadeOutTics) * FRACUNIT / FadeOutTics;
-		trans = FixedMul(trans, Alpha);
+		float trans = float(Alpha * -(Tics - FadeOutTics) / FadeOutTics);
 		if (hudheight == 0)
 		{
-			if (con_scaletext <= 1)
+			if (active_con_scaletext() <= 1)
 			{
 				screen->DrawText (Font, TextColor, x, y, Lines[linenum].Text,
 					DTA_CleanNoMove, clean,
-					DTA_Alpha, trans,
+					DTA_AlphaF, trans,
 					DTA_RenderStyle, Style,
 					TAG_DONE);
 			}
 			else
 			{
 				screen->DrawText (Font, TextColor, x, y, Lines[linenum].Text,
-					DTA_VirtualWidth, SCREENWIDTH/2,
-					DTA_VirtualHeight, SCREENHEIGHT/2,
-					DTA_Alpha, trans,
+					DTA_VirtualWidth, SCREENWIDTH / active_con_scaletext(),
+					DTA_VirtualHeight, SCREENHEIGHT / active_con_scaletext(),
+					DTA_AlphaF, trans,
 					DTA_RenderStyle, Style,
 					DTA_KeepRatio, true,
 					TAG_DONE);
@@ -602,7 +584,7 @@ void DHUDMessageFadeOut::DoDraw (int linenum, int x, int y, bool clean, int hudh
 				DTA_ClipRight, ClipRight,
 				DTA_ClipTop, ClipTop,
 				DTA_ClipBottom, ClipBot,
-				DTA_Alpha, trans,
+				DTA_AlphaF, trans,
 				DTA_RenderStyle, Style,
 				TAG_DONE);
 		}
@@ -635,10 +617,10 @@ DHUDMessageFadeInOut::DHUDMessageFadeInOut (FFont *font, const char *text, float
 //
 //============================================================================
 
-void DHUDMessageFadeInOut::Serialize (FArchive &arc)
+void DHUDMessageFadeInOut::Serialize(FSerializer &arc)
 {
 	Super::Serialize (arc);
-	arc << FadeInTics;
+	arc("fadeintics", FadeInTics);
 }
 
 //============================================================================
@@ -671,24 +653,23 @@ void DHUDMessageFadeInOut::DoDraw (int linenum, int x, int y, bool clean, int hu
 {
 	if (State == 0)
 	{
-		fixed_t trans = Tics * FRACUNIT / FadeInTics;
-		trans = FixedMul(trans, Alpha);
+		float trans = float(Alpha * Tics / FadeInTics);
 		if (hudheight == 0)
 		{
-			if (con_scaletext <= 1)
+			if (active_con_scaletext() <= 1)
 			{
 				screen->DrawText (Font, TextColor, x, y, Lines[linenum].Text,
 					DTA_CleanNoMove, clean,
-					DTA_Alpha, trans,
+					DTA_AlphaF, trans,
 					DTA_RenderStyle, Style,
 					TAG_DONE);
 			}
 			else
 			{
 				screen->DrawText (Font, TextColor, x, y, Lines[linenum].Text,
-					DTA_VirtualWidth, SCREENWIDTH/2,
-					DTA_VirtualHeight, SCREENHEIGHT/2,
-					DTA_Alpha, trans,
+					DTA_VirtualWidth, SCREENWIDTH / active_con_scaletext(),
+					DTA_VirtualHeight, SCREENHEIGHT / active_con_scaletext(),
+					DTA_AlphaF, trans,
 					DTA_RenderStyle, Style,
 					DTA_KeepRatio, true,
 					TAG_DONE);
@@ -703,7 +684,7 @@ void DHUDMessageFadeInOut::DoDraw (int linenum, int x, int y, bool clean, int hu
 				DTA_ClipRight, ClipRight,
 				DTA_ClipTop, ClipTop,
 				DTA_ClipBottom, ClipBot,
-				DTA_Alpha, trans,
+				DTA_AlphaF, trans,
 				DTA_RenderStyle, Style,
 				TAG_DONE);
 		}
@@ -745,10 +726,13 @@ DHUDMessageTypeOnFadeOut::DHUDMessageTypeOnFadeOut (FFont *font, const char *tex
 //
 //============================================================================
 
-void DHUDMessageTypeOnFadeOut::Serialize (FArchive &arc)
+void DHUDMessageTypeOnFadeOut::Serialize(FSerializer &arc)
 {
 	Super::Serialize (arc);
-	arc << TypeOnTime << CurrLine << LineVisible << LineLen;
+	arc("typeontime", TypeOnTime)
+		("currline", CurrLine)
+		("linevisible", LineVisible)
+		("linelen", LineLen);
 }
 
 //============================================================================
@@ -853,23 +837,23 @@ void DHUDMessageTypeOnFadeOut::DoDraw (int linenum, int x, int y, bool clean, in
 		{
 			if (hudheight == 0)
 			{
-				if (con_scaletext <= 1)
+				if (active_con_scaletext() <= 1)
 				{
 					screen->DrawText (Font, TextColor, x, y, Lines[linenum].Text,
 						DTA_CleanNoMove, clean,
 						DTA_TextLen, LineVisible,
-						DTA_Alpha, Alpha,
+						DTA_AlphaF, Alpha,
 						DTA_RenderStyle, Style,
 						TAG_DONE);
 				}
 				else
 				{
 					screen->DrawText (Font, TextColor, x, y, Lines[linenum].Text,
-						DTA_VirtualWidth, SCREENWIDTH/2,
-						DTA_VirtualHeight, SCREENHEIGHT/2,
+						DTA_VirtualWidth, SCREENWIDTH / active_con_scaletext(),
+						DTA_VirtualHeight, SCREENHEIGHT / active_con_scaletext(),
 						DTA_KeepRatio, true,
 						DTA_TextLen, LineVisible,
-						DTA_Alpha, Alpha,
+						DTA_AlphaF, Alpha,
 						DTA_RenderStyle, Style,
 						TAG_DONE);
 				}
@@ -883,7 +867,7 @@ void DHUDMessageTypeOnFadeOut::DoDraw (int linenum, int x, int y, bool clean, in
 					DTA_ClipRight, ClipRight,
 					DTA_ClipTop, ClipTop,
 					DTA_ClipBottom, ClipBot,
-					DTA_Alpha, Alpha,
+					DTA_AlphaF, Alpha,
 					DTA_TextLen, LineVisible,
 					DTA_RenderStyle, Style,
 					TAG_DONE);

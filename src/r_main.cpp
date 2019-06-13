@@ -37,6 +37,7 @@
 #include "r_local.h"
 #include "r_plane.h"
 #include "r_bsp.h"
+#include "r_segs.h"
 #include "r_3dfloors.h"
 #include "r_sky.h"
 #include "st_stuff.h"
@@ -56,7 +57,39 @@
 #include "st_start.h"
 #include "v_font.h"
 #include "r_data/colormaps.h"
-#include "farchive.h"
+#include "p_maputl.h"
+#include "r_thread.h"
+
+CVAR (String, r_viewsize, "", CVAR_NOSET)
+CVAR (Bool, r_shadercolormaps, true, CVAR_ARCHIVE)
+
+CUSTOM_CVAR (Int, r_columnmethod, 1, CVAR_ARCHIVE|CVAR_GLOBALCONFIG)
+{
+	if (self != 0 && self != 1)
+	{
+		self = 1;
+	}
+	else
+	{ // Trigger the change
+		setsizeneeded = true;
+	}
+}
+
+CVAR(Int, r_portal_recursions, 4, CVAR_ARCHIVE)
+CVAR(Bool, r_highlight_portals, false, CVAR_ARCHIVE)
+
+EXTERN_CVAR(Bool, r_fullbrightignoresectorcolor)
+
+extern cycle_t WallCycles, PlaneCycles, MaskedCycles, WallScanCycles;
+extern cycle_t FrameCycles;
+
+extern bool r_showviewer;
+
+cycle_t WallCycles, PlaneCycles, MaskedCycles, WallScanCycles;
+
+namespace swrenderer
+{
+	using namespace drawerargs;
 
 // MACROS ------------------------------------------------------------------
 
@@ -66,6 +99,7 @@
 #define TEST_Z 2164524 
 #define TEST_ANGLE 2468347904 
 #endif
+
 
 // TYPES -------------------------------------------------------------------
 
@@ -84,50 +118,44 @@ static void R_ShutdownRenderer();
 
 extern short *openings;
 extern bool r_fakingunderwater;
-extern "C" int fuzzviewheight;
+extern int fuzzviewheight;
+extern subsector_t *InSubsector;
 
 
 // PRIVATE DATA DECLARATIONS -----------------------------------------------
 
-static float CurrentVisibility = 8.f;
-static fixed_t MaxVisForWall;
-static fixed_t MaxVisForFloor;
-extern bool r_showviewer;
+static double CurrentVisibility = 8.f;
+static double MaxVisForWall;
+static double MaxVisForFloor;
 bool r_dontmaplines;
 
 // PUBLIC DATA DEFINITIONS -------------------------------------------------
 
-CVAR (String, r_viewsize, "", CVAR_NOSET)
-CVAR (Bool, r_shadercolormaps, true, CVAR_ARCHIVE)
-
-fixed_t			r_BaseVisibility;
-fixed_t			r_WallVisibility;
-fixed_t			r_FloorVisibility;
+double			r_BaseVisibility;
+double			r_WallVisibility;
+double			r_FloorVisibility;
 float			r_TiltVisibility;
-fixed_t			r_SpriteVisibility;
-fixed_t			r_ParticleVisibility;
-fixed_t			r_SkyVisibility;
+double			r_SpriteVisibility;
+double			r_ParticleVisibility;
 
-fixed_t			GlobVis;
+double			GlobVis;
 fixed_t			viewingrangerecip;
-fixed_t			FocalLengthX;
-fixed_t			FocalLengthY;
-float			FocalLengthXfloat;
+double			FocalLengthX;
+double			FocalLengthY;
 FDynamicColormap*basecolormap;		// [RH] colormap currently drawing with
 int				fixedlightlev;
 lighttable_t	*fixedcolormap;
 FSpecialColormap *realfixedcolormap;
-float			WallTMapScale2;
+double			WallTMapScale2;
 
 
 bool			bRenderingToCanvas;	// [RH] True if rendering to a special canvas
-fixed_t			globaluclip, globaldclip;
-fixed_t 		centerxfrac;
-fixed_t 		centeryfrac;
-fixed_t			yaspectmul;
-fixed_t			baseyaspectmul;		// yaspectmul without a forced aspect ratio
-float			iyaspectmulfloat;
-fixed_t			InvZtoScale;
+double			globaluclip, globaldclip;
+double			CenterX, CenterY;
+double			YaspectMul;
+double			BaseYaspectMul;		// yaspectmul without a forced aspect ratio
+double			IYaspectMul;
+double			InvZtoScale;
 
 // just for profiling purposes
 int 			linecount;
@@ -155,9 +183,7 @@ void (*spanfunc) (void);
 void (*hcolfunc_pre) (void);
 void (*hcolfunc_post1) (int hx, int sx, int yl, int yh);
 void (*hcolfunc_post2) (int hx, int sx, int yl, int yh);
-void (STACK_ARGS *hcolfunc_post4) (int sx, int yl, int yh);
-
-cycle_t WallCycles, PlaneCycles, MaskedCycles, WallScanCycles;
+void (*hcolfunc_post4) (int sx, int yl, int yh);
 
 // PRIVATE DATA DEFINITIONS ------------------------------------------------
 
@@ -167,79 +193,35 @@ static int lastcenteryfrac;
 
 //==========================================================================
 //
-// viewangletox
-//
-// Used solely for construction the xtoviewangle table.
-//
-//==========================================================================
-
-static inline int viewangletox(int i)
-{
-	if (finetangent[i] > FRACUNIT*2)
-	{
-		return -1;
-	}
-	else if (finetangent[i] < -FRACUNIT*2)
-	{
-		return viewwidth+1;
-	}
-	else
-	{
-		int t = FixedMul(finetangent[i], FocalLengthX);
-		t = (centerxfrac - t + FRACUNIT-1) >> FRACBITS;
-		return clamp(t, -1, viewwidth+1);
-	}
-}
-
-//==========================================================================
-//
 // R_InitTextureMapping
 //
 //==========================================================================
 
 void R_InitTextureMapping ()
 {
-	int i, x;
+	int i;
 
-	// Calc focallength so FieldOfView fineangles covers viewwidth.
-	FocalLengthX = FixedDiv (centerxfrac, FocalTangent);
-	FocalLengthY = Scale (centerxfrac, yaspectmul, FocalTangent);
-	FocalLengthXfloat = (float)FocalLengthX / 65536.f;
+	// Calc focallength so FieldOfView angles cover viewwidth.
+	FocalLengthX = CenterX / FocalTangent;
+	FocalLengthY = FocalLengthX * YaspectMul;
 
 	// This is 1/FocalTangent before the widescreen extension of FOV.
-	viewingrangerecip = DivScale32(1, finetangent[FINEANGLES/4+(FieldOfView/2)]);
+	viewingrangerecip = FLOAT2FIXED(1. / tan(FieldOfView.Radians() / 2));
 
-	// [RH] Do not generate viewangletox, because texture mapping is no
-	// longer done with trig, so it's not needed.
 
 	// Now generate xtoviewangle for sky texture mapping.
-	// We do this with a hybrid approach: The center 90 degree span is
-	// constructed as per the original code:
-	//   Scan xtoviewangle to find the smallest view angle that maps to x.
-	//   (viewangletox is sorted in non-increasing order.)
-	//   This reduces the chances of "doubling-up" of texture columns in
-	//   the drawn sky texture.
-	// The remaining arcs are done with tantoangle instead.
+	// [RH] Do not generate viewangletox, because texture mapping is no
+	// longer done with trig, so it's not needed.
+	const double slopestep = FocalTangent / centerx;
+	double slope;
 
-	const int t1 = MAX<int>(centerx - (FocalLengthX >> FRACBITS), 0);
-	const int t2 = MIN<int>(centerx + (FocalLengthX >> FRACBITS), viewwidth);
-	const fixed_t dfocus = FocalLengthX >> DBITS;
-
-	for (i = 0, x = t2; x >= t1; --x)
+	for (i = centerx, slope = 0; i <= viewwidth; i++, slope += slopestep)
 	{
-		while(viewangletox(i) > x)
-		{
-			++i;
-		}
-		xtoviewangle[x] = (i << ANGLETOFINESHIFT) - ANGLE_90;
+		xtoviewangle[i] = angle_t((2 * M_PI - atan(slope)) * (ANGLE_180 / M_PI));
 	}
-	for (x = t2 + 1; x <= viewwidth; ++x)
+	for (i = 0; i < centerx; i++)
 	{
-		xtoviewangle[x] = ANGLE_270 + tantoangle[dfocus / (x - centerx)];
-	}
-	for (x = 0; x < t1; ++x)
-	{
-		xtoviewangle[x] = (angle_t)(-(signed)xtoviewangle[viewwidth - x]);
+		xtoviewangle[i] = 0 - xtoviewangle[viewwidth - i - 1];
 	}
 }
 
@@ -251,10 +233,10 @@ void R_InitTextureMapping ()
 //
 //==========================================================================
 
-void R_SetVisibility (float vis)
+void R_SetVisibility(double vis)
 {
 	// Allow negative visibilities, just for novelty's sake
-	vis = clamp (vis, -204.7f, 204.7f);	// (205 and larger do not work in 5:4 aspect ratio)
+	vis = clamp(vis, -204.7, 204.7);	// (205 and larger do not work in 5:4 aspect ratio)
 
 	CurrentVisibility = vis;
 
@@ -265,7 +247,7 @@ void R_SetVisibility (float vis)
 		return;
 	}
 
-	r_BaseVisibility = xs_RoundToInt(vis * 65536.f);
+	r_BaseVisibility = vis;
 
 	// Prevent overflow on walls
 	if (r_BaseVisibility < 0 && r_BaseVisibility < -MaxVisForWall)
@@ -275,8 +257,8 @@ void R_SetVisibility (float vis)
 	else
 		r_WallVisibility = r_BaseVisibility;
 
-	r_WallVisibility = FixedMul (Scale (InvZtoScale, SCREENWIDTH*BaseRatioSizes[WidescreenRatio][1],
-		viewwidth*SCREENHEIGHT*3), FixedMul (r_WallVisibility, FocalTangent));
+	r_WallVisibility = (InvZtoScale * SCREENWIDTH*AspectBaseHeight(WidescreenRatio) /
+		(viewwidth*SCREENHEIGHT*3)) * (r_WallVisibility * FocalTangent);
 
 	// Prevent overflow on floors/ceilings. Note that the calculation of
 	// MaxVisForFloor means that planes less than two units from the player's
@@ -289,9 +271,9 @@ void R_SetVisibility (float vis)
 	else
 		r_FloorVisibility = r_BaseVisibility;
 
-	r_FloorVisibility = Scale (160*FRACUNIT, r_FloorVisibility, FocalLengthY);
+	r_FloorVisibility = 160.0 * r_FloorVisibility / FocalLengthY;
 
-	r_TiltVisibility = vis * (float)FocalTangent * (16.f * 320.f) / (float)viewwidth;
+	r_TiltVisibility = float(vis * FocalTangent * (16.f * 320.f) / viewwidth);
 	r_SpriteVisibility = r_WallVisibility;
 }
 
@@ -301,7 +283,7 @@ void R_SetVisibility (float vis)
 //
 //==========================================================================
 
-float R_GetVisibility ()
+double R_GetVisibility()
 {
 	return CurrentVisibility;
 }
@@ -324,7 +306,7 @@ CCMD (r_visibility)
 	}
 	else if (!netgame)
 	{
-		R_SetVisibility ((float)atof (argv[1]));
+		R_SetVisibility(atof(argv[1]));
 	}
 	else
 	{
@@ -338,7 +320,7 @@ CCMD (r_visibility)
 //
 //==========================================================================
 
-void R_SWRSetWindow(int windowSize, int fullWidth, int fullHeight, int stHeight, int trueratio)
+void R_SWRSetWindow(int windowSize, int fullWidth, int fullHeight, int stHeight, float trueratio)
 {
 	int virtheight, virtwidth, virtwidth2, virtheight2;
 
@@ -353,77 +335,56 @@ void R_SWRSetWindow(int windowSize, int fullWidth, int fullHeight, int stHeight,
 	}
 
 	fuzzviewheight = viewheight - 2;	// Maximum row the fuzzer can draw to
-	halfviewwidth = (viewwidth >> 1) - 1;
 
 	lastcenteryfrac = 1<<30;
-	centerxfrac = centerx<<FRACBITS;
-	centeryfrac = centery<<FRACBITS;
+	CenterX = centerx;
+	CenterY = centery;
 
 	virtwidth = virtwidth2 = fullWidth;
 	virtheight = virtheight2 = fullHeight;
 
-	if (trueratio & 4)
+	if (AspectTallerThanWide(trueratio))
 	{
-		virtheight2 = virtheight2 * BaseRatioSizes[trueratio][3] / 48;
+		virtheight2 = virtheight2 * AspectMultiplier(trueratio) / 48;
 	}
 	else
 	{
-		virtwidth2 = virtwidth2 * BaseRatioSizes[trueratio][3] / 48;
+		virtwidth2 = virtwidth2 * AspectMultiplier(trueratio) / 48;
 	}
 
-	if (WidescreenRatio & 4)
+	if (AspectTallerThanWide(WidescreenRatio))
 	{
-		virtheight = virtheight * BaseRatioSizes[WidescreenRatio][3] / 48;
+		virtheight = virtheight * AspectMultiplier(WidescreenRatio) / 48;
 	}
 	else
 	{
-		virtwidth = virtwidth * BaseRatioSizes[WidescreenRatio][3] / 48;
+		virtwidth = virtwidth * AspectMultiplier(WidescreenRatio) / 48;
 	}
 
-	baseyaspectmul = Scale(320 << FRACBITS, virtheight2, r_Yaspect * virtwidth2);
-	yaspectmul = Scale ((320<<FRACBITS), virtheight, r_Yaspect * virtwidth);
-	iyaspectmulfloat = (float)virtwidth * r_Yaspect / 320.f / (float)virtheight;
-	InvZtoScale = yaspectmul * centerx;
+	BaseYaspectMul = 320.0 * virtheight2 / (r_Yaspect * virtwidth2);
+	YaspectMul = 320.0 * virtheight / (r_Yaspect * virtwidth);
+	IYaspectMul = (double)virtwidth * r_Yaspect / 320.0 / virtheight;
+	InvZtoScale = YaspectMul * CenterX;
 
-	WallTMapScale2 = iyaspectmulfloat * 64.f / (float)centerx;
+	WallTMapScale2 = IYaspectMul / CenterX;
 
 	// psprite scales
-	pspritexscale = (centerxwide << FRACBITS) / 160;
-	pspriteyscale = FixedMul (pspritexscale, yaspectmul);
-	pspritexiscale = FixedDiv (FRACUNIT, pspritexscale);
+	pspritexscale = centerxwide / 160.0;
+	pspriteyscale = pspritexscale * YaspectMul;
+	pspritexiscale = 1 / pspritexscale;
 
 	// thing clipping
-	clearbufshort (screenheightarray, viewwidth, (short)viewheight);
+	fillshort (screenheightarray, viewwidth, (short)viewheight);
 
 	R_InitTextureMapping ();
 
-	MaxVisForWall = FixedMul (Scale (InvZtoScale, SCREENWIDTH*r_Yaspect,
-		viewwidth*SCREENHEIGHT), FocalTangent);
-	MaxVisForWall = FixedDiv (0x7fff0000, MaxVisForWall);
-	MaxVisForFloor = Scale (FixedDiv (0x7fff0000, viewheight<<(FRACBITS-2)), FocalLengthY, 160*FRACUNIT);
+	MaxVisForWall = (InvZtoScale * (SCREENWIDTH*r_Yaspect) /
+		(viewwidth*SCREENHEIGHT * FocalTangent));
+	MaxVisForWall = 32767.0 / MaxVisForWall;
+	MaxVisForFloor = 32767.0 / (viewheight >> 2) * FocalLengthY / 160;
 
 	// Reset r_*Visibility vars
-	R_SetVisibility (R_GetVisibility ());
-}
-
-//==========================================================================
-//
-// CVAR r_columnmethod
-//
-// Selects which version of the seg renderers to use.
-//
-//==========================================================================
-
-CUSTOM_CVAR (Int, r_columnmethod, 1, CVAR_ARCHIVE|CVAR_GLOBALCONFIG)
-{
-	if (self != 0 && self != 1)
-	{
-		self = 1;
-	}
-	else
-	{ // Trigger the change
-		setsizeneeded = true;
-	}
+	R_SetVisibility(R_GetVisibility());
 }
 
 //==========================================================================
@@ -436,7 +397,7 @@ void R_InitRenderer()
 {
 	atterm(R_ShutdownRenderer);
 	// viewwidth / viewheight are set by the defaults
-	clearbufshort (zeroarray, MAXWIDTH, 0);
+	fillshort (zeroarray, MAXWIDTH, 0);
 
 	R_InitPlanes ();
 	R_InitShadeMaps();
@@ -486,10 +447,8 @@ static void R_ShutdownRenderer()
 
 void R_CopyStackedViewParameters()
 {
-	stacked_viewx = viewx;
-	stacked_viewy = viewy;
-	stacked_viewz = viewz;
-	stacked_angle = viewangle;
+	stacked_viewpos = ViewPos;
+	stacked_angle = ViewAngle;
 	stacked_extralight = extralight;
 	stacked_visibility = R_GetVisibility();
 }
@@ -528,6 +487,11 @@ void R_SetupColormap(player_t *player)
 		else if (player->fixedlightlevel >= 0 && player->fixedlightlevel < NUMCOLORMAPS)
 		{
 			fixedlightlev = player->fixedlightlevel * 256;
+			// [SP] Emulate GZDoom's light-amp goggles.
+			if (r_fullbrightignoresectorcolor && fixedlightlev >= 0)
+			{
+				fixedcolormap = FullNormalLight.Maps;
+			}
 		}
 	}
 	// [RH] Inverse light for shooting the Sigil
@@ -548,154 +512,283 @@ void R_SetupColormap(player_t *player)
 
 void R_SetupFreelook()
 {
-	{
-		fixed_t dy;
+	double dy;
 		
-		if (camera != NULL)
-		{
-			dy = FixedMul (FocalLengthY, finetangent[(ANGLE_90-viewpitch)>>ANGLETOFINESHIFT]);
-		}
-		else
-		{
-			dy = 0;
-		}
+	if (camera != NULL)
+	{
+		dy = FocalLengthY * (-ViewPitch).Tan();
+	}
+	else
+	{
+		dy = 0;
+	}
 
-		centeryfrac = (viewheight << (FRACBITS-1)) + dy;
-		centery = centeryfrac >> FRACBITS;
-		globaluclip = FixedDiv (-centeryfrac, InvZtoScale);
-		globaldclip = FixedDiv ((viewheight<<FRACBITS)-centeryfrac, InvZtoScale);
+	CenterY = (viewheight / 2.0) + dy;
+	centery = xs_ToInt(CenterY);
+	globaluclip = -CenterY / InvZtoScale;
+	globaldclip = (viewheight - CenterY) / InvZtoScale;
 
-		//centeryfrac &= 0xffff0000;
-		int e, i;
+	//centeryfrac &= 0xffff0000;
+	int e, i;
 
-		i = 0;
-		e = viewheight;
-		fixed_t focus = FocalLengthY;
-		fixed_t den;
-		if (i < centery)
+	i = 0;
+	e = viewheight;
+	float focus = float(FocalLengthY);
+	float den;
+	float cy = float(CenterY);
+	if (i < centery)
+	{
+		den = cy - i - 0.5f;
+		if (e <= centery)
 		{
-			den = centeryfrac - (i << FRACBITS) - FRACUNIT/2;
-			if (e <= centery)
-			{
-				do {
-					yslope[i] = FixedDiv (focus, den);
-					den -= FRACUNIT;
-				} while (++i < e);
-			}
-			else
-			{
-				do {
-					yslope[i] = FixedDiv (focus, den);
-					den -= FRACUNIT;
-				} while (++i < centery);
-				den = (i << FRACBITS) - centeryfrac + FRACUNIT/2;
-				do {
-					yslope[i] = FixedDiv (focus, den);
-					den += FRACUNIT;
-				} while (++i < e);
-			}
-		}
-		else
-		{
-			den = (i << FRACBITS) - centeryfrac + FRACUNIT/2;
 			do {
-				yslope[i] = FixedDiv (focus, den);
-				den += FRACUNIT;
+				yslope[i] = focus / den;
+				den -= 1;
 			} while (++i < e);
 		}
+		else
+		{
+			do {
+				yslope[i] = focus / den;
+				den -= 1;
+			} while (++i < centery);
+			den = i - cy + 0.5f;
+			do {
+				yslope[i] = focus / den;
+				den += 1;
+			} while (++i < e);
+		}
+	}
+	else
+	{
+		den = i - cy + 0.5f;
+		do {
+			yslope[i] = focus / den;
+			den += 1;
+		} while (++i < e);
 	}
 }
 
 //==========================================================================
 //
-// R_EnterMirror
+// R_EnterPortal
 //
 // [RH] Draw the reflection inside a mirror
+// [ZZ] Merged with portal code, originally called R_EnterMirror
 //
 //==========================================================================
 
-void R_EnterMirror (drawseg_t *ds, int depth)
+void R_HighlightPortal (PortalDrawseg* pds)
 {
-	angle_t startang = viewangle;
-	fixed_t startx = viewx;
-	fixed_t starty = viewy;
+	// [ZZ] NO OVERFLOW CHECKS HERE
+	//      I believe it won't break. if it does, blame me. :(
 
-	CurrentMirror++;
+	BYTE color = (BYTE)BestColor((DWORD *)GPalette.BaseColors, 255, 0, 0, 0, 255);
 
-	unsigned int mirrorsAtStart = WallMirrors.Size ();
+	BYTE* pixels = RenderTarget->GetBuffer();
+	// top edge
+	for (int x = pds->x1; x < pds->x2; x++)
+	{
+		if (x < 0 || x >= RenderTarget->GetWidth())
+			continue;
 
-	vertex_t *v1 = ds->curline->v1;
+		int p = x - pds->x1;
+		int Ytop = pds->ceilingclip[p];
+		int Ybottom = pds->floorclip[p];
 
-	// Reflect the current view behind the mirror.
-	if (ds->curline->linedef->dx == 0)
-	{ // vertical mirror
-		viewx = v1->x - startx + v1->x;
+		if (x == pds->x1 || x == pds->x2-1)
+		{
+			RenderTarget->DrawLine(x, Ytop, x, Ybottom+1, color, 0);
+			continue;
+		}
+
+		int YtopPrev = pds->ceilingclip[p-1];
+		int YbottomPrev = pds->floorclip[p-1];
+
+		if (abs(Ytop-YtopPrev) > 1)
+			RenderTarget->DrawLine(x, YtopPrev, x, Ytop, color, 0);
+		else *(pixels + Ytop * RenderTarget->GetPitch() + x) = color;
+
+		if (abs(Ybottom-YbottomPrev) > 1)
+			RenderTarget->DrawLine(x, YbottomPrev, x, Ybottom, color, 0);
+		else *(pixels + Ybottom * RenderTarget->GetPitch() + x) = color;
 	}
-	else if (ds->curline->linedef->dy == 0)
-	{ // horizontal mirror
-		viewy = v1->y - starty + v1->y;
+}
+
+void R_EnterPortal (PortalDrawseg* pds, int depth)
+{
+	// [ZZ] check depth. fill portal with black if it's exceeding the visual recursion limit, and continue like nothing happened.
+	if (depth >= r_portal_recursions)
+	{
+		BYTE color = (BYTE)BestColor((DWORD *)GPalette.BaseColors, 0, 0, 0, 0, 255);
+		int spacing = RenderTarget->GetPitch();
+		for (int x = pds->x1; x < pds->x2; x++)
+		{
+			if (x < 0 || x >= RenderTarget->GetWidth())
+				continue;
+
+			int Ytop = pds->ceilingclip[x-pds->x1];
+			int Ybottom = pds->floorclip[x-pds->x1];
+
+			BYTE *dest = RenderTarget->GetBuffer() + x + Ytop * spacing;
+
+			for (int y = Ytop; y <= Ybottom; y++)
+			{
+				*dest = color;
+				dest += spacing;
+			}
+		}
+
+		if (r_highlight_portals)
+			R_HighlightPortal(pds);
+
+		return;
+	}
+
+	DAngle startang = ViewAngle;
+	DVector3 startpos = ViewPos;
+	DVector3 savedpath[2] = { ViewPath[0], ViewPath[1] };
+	ActorRenderFlags savedvisibility = camera? camera->renderflags & RF_INVISIBLE : ActorRenderFlags::FromInt(0);
+
+	CurrentPortalUniq++;
+
+	unsigned int portalsAtStart = WallPortals.Size ();
+
+	if (pds->mirror)
+	{
+		//vertex_t *v1 = ds->curline->v1;
+		vertex_t *v1 = pds->src->v1;
+
+		// Reflect the current view behind the mirror.
+		if (pds->src->Delta().X == 0)
+		{ // vertical mirror
+			ViewPos.X = v1->fX() - startpos.X + v1->fX();
+		}
+		else if (pds->src->Delta().Y == 0)
+		{ // horizontal mirror
+			ViewPos.Y = v1->fY() - startpos.Y + v1->fY();
+		}
+		else
+		{ // any mirror
+			vertex_t *v2 = pds->src->v2;
+
+			double dx = v2->fX() - v1->fX();
+			double dy = v2->fY() - v1->fY();
+			double x1 = v1->fX();
+			double y1 = v1->fY();
+			double x = startpos.X;
+			double y = startpos.Y;
+
+			// the above two cases catch len == 0
+			double r = ((x - x1)*dx + (y - y1)*dy) / (dx*dx + dy*dy);
+
+			ViewPos.X = (x1 + r * dx)*2 - x;
+			ViewPos.Y = (y1 + r * dy)*2 - y;
+		}
+		ViewAngle = pds->src->Delta().Angle() * 2 - startang;
 	}
 	else
-	{ // any mirror--use floats to avoid integer overflow
-		vertex_t *v2 = ds->curline->v2;
+	{
+		P_TranslatePortalXY(pds->src, ViewPos.X, ViewPos.Y);
+		P_TranslatePortalZ(pds->src, ViewPos.Z);
+		P_TranslatePortalAngle(pds->src, ViewAngle);
+		P_TranslatePortalXY(pds->src, ViewPath[0].X, ViewPath[0].Y);
+		P_TranslatePortalXY(pds->src, ViewPath[1].X, ViewPath[1].Y);
 
-		float dx = FIXED2FLOAT(v2->x - v1->x);
-		float dy = FIXED2FLOAT(v2->y - v1->y);
-		float x1 = FIXED2FLOAT(v1->x);
-		float y1 = FIXED2FLOAT(v1->y);
-		float x = FIXED2FLOAT(startx);
-		float y = FIXED2FLOAT(starty);
+		if (!r_showviewer && camera && P_PointOnLineSidePrecise(ViewPath[0], pds->dst) != P_PointOnLineSidePrecise(ViewPath[1], pds->dst))
+		{
+			double distp = (ViewPath[0] - ViewPath[1]).Length();
+			if (distp > EQUAL_EPSILON)
+			{
+				double dist1 = (ViewPos - ViewPath[0]).Length();
+				double dist2 = (ViewPos - ViewPath[1]).Length();
 
-		// the above two cases catch len == 0
-		float r = ((x - x1)*dx + (y - y1)*dy) / (dx*dx + dy*dy);
-
-		viewx = FLOAT2FIXED((x1 + r * dx)*2 - x);
-		viewy = FLOAT2FIXED((y1 + r * dy)*2 - y);
+				if (dist1 + dist2 < distp + 1)
+				{
+					camera->renderflags |= RF_INVISIBLE;
+				}
+			}
+		}
 	}
-	viewangle = 2*R_PointToAngle2 (ds->curline->v1->x, ds->curline->v1->y,
-								   ds->curline->v2->x, ds->curline->v2->y) - startang;
 
-	viewsin = finesine[viewangle>>ANGLETOFINESHIFT];
-	viewcos = finecosine[viewangle>>ANGLETOFINESHIFT];
+	ViewSin = ViewAngle.Sin();
+	ViewCos = ViewAngle.Cos();
 
-	viewtansin = FixedMul (FocalTangent, viewsin);
-	viewtancos = FixedMul (FocalTangent, viewcos);
+	ViewTanSin = FocalTangent * ViewSin;
+	ViewTanCos = FocalTangent * ViewCos;
 
 	R_CopyStackedViewParameters();
 
 	validcount++;
-	ActiveWallMirror = ds->curline;
+	PortalDrawseg* prevpds = CurrentPortal;
+	CurrentPortal = pds;
 
 	R_ClearPlanes (false);
-	R_ClearClipSegs (ds->x1, ds->x2 + 1);
+	R_ClearClipSegs (pds->x1, pds->x2);
 
-	memcpy (ceilingclip + ds->x1, openings + ds->sprtopclip, (ds->x2 - ds->x1 + 1)*sizeof(*ceilingclip));
-	memcpy (floorclip + ds->x1, openings + ds->sprbottomclip, (ds->x2 - ds->x1 + 1)*sizeof(*floorclip));
-
-	WindowLeft = ds->x1;
-	WindowRight = ds->x2;
-	MirrorFlags = (depth + 1) & 1;
-
-	R_RenderBSPNode (nodes + numnodes - 1);
-	R_3D_ResetClip(); // reset clips (floor/ceiling)
-
-	R_DrawPlanes ();
-	R_DrawSkyBoxes ();
-
-	// Allow up to 4 recursions through a mirror
-	if (depth < 4)
+	WindowLeft = pds->x1;
+	WindowRight = pds->x2;
+	
+	// RF_XFLIP should be removed before calling the root function
+	int prevmf = MirrorFlags;
+	if (pds->mirror)
 	{
-		unsigned int mirrorsAtEnd = WallMirrors.Size ();
-
-		for (; mirrorsAtStart < mirrorsAtEnd; mirrorsAtStart++)
-		{
-			R_EnterMirror (drawsegs + WallMirrors[mirrorsAtStart], depth + 1);
-		}
+		if (MirrorFlags & RF_XFLIP)
+			MirrorFlags &= ~RF_XFLIP;
+		else MirrorFlags |= RF_XFLIP;
 	}
 
-	viewangle = startang;
-	viewx = startx;
-	viewy = starty;
+	// some portals have height differences, account for this here
+	R_3D_EnterSkybox(); // push 3D floor height map
+	CurrentPortalInSkybox = false; // first portal in a skybox should set this variable to false for proper clipping in skyboxes.
+
+	// first pass, set clipping
+	memcpy (ceilingclip + pds->x1, &pds->ceilingclip[0], pds->len*sizeof(*ceilingclip));
+	memcpy (floorclip + pds->x1, &pds->floorclip[0], pds->len*sizeof(*floorclip));
+
+	InSubsector = NULL;
+	R_RenderBSPNode (nodes + numnodes - 1);
+	R_3D_ResetClip(); // reset clips (floor/ceiling)
+	if (!savedvisibility && camera) camera->renderflags &= ~RF_INVISIBLE;
+
+	PlaneCycles.Clock();
+	R_DrawPlanes ();
+	R_DrawPortals ();
+	PlaneCycles.Unclock();
+
+	double vzp = ViewPos.Z;
+
+	int prevuniq = CurrentPortalUniq;
+	// depth check is in another place right now
+	unsigned int portalsAtEnd = WallPortals.Size ();
+	for (; portalsAtStart < portalsAtEnd; portalsAtStart++)
+	{
+		R_EnterPortal (&WallPortals[portalsAtStart], depth + 1);
+	}
+	int prevuniq2 = CurrentPortalUniq;
+	CurrentPortalUniq = prevuniq;
+
+	NetUpdate();
+
+	MaskedCycles.Clock(); // [ZZ] count sprites in portals/mirrors along with normal ones.
+	R_DrawMasked ();	  //      this is required since with portals there often will be cases when more than 80% of the view is inside a portal.
+	MaskedCycles.Unclock();
+
+	NetUpdate();
+
+	R_3D_LeaveSkybox(); // pop 3D floor height map
+	CurrentPortalUniq = prevuniq2;
+
+	// draw a red line around a portal if it's being highlighted
+	if (r_highlight_portals)
+		R_HighlightPortal(pds);
+
+	CurrentPortal = prevpds;
+	MirrorFlags = prevmf;
+	ViewAngle = startang;
+	ViewPos = startpos;
+	ViewPath[0] = savedpath[0];
+	ViewPath[1] = savedpath[1];
 }
 
 //==========================================================================
@@ -719,9 +812,6 @@ void R_SetupBuffer ()
 		{
 			dc_pitch = pitch;
 			R_InitFuzzTable (pitch);
-#if defined(X86_ASM) || defined(X64_ASM)
-			ASM_PatchPitch ();
-#endif
 		}
 		dc_destorg = lineptr;
 		for (int i = 0; i < RenderTarget->GetHeight(); i++)
@@ -761,10 +851,10 @@ void R_RenderActorView (AActor *actor, bool dontmaplines)
 	// [RH] Show off segs if r_drawflat is 1
 	if (r_drawflat)
 	{
-		hcolfunc_pre = R_FillColumnHorizP;
+		hcolfunc_pre = R_FillColumnHoriz;
 		hcolfunc_post1 = rt_copy1col;
 		hcolfunc_post4 = rt_copy4cols;
-		colfunc = R_FillColumnP;
+		colfunc = R_FillColumn;
 		spanfunc = R_FillSpan;
 	}
 	else
@@ -777,9 +867,10 @@ void R_RenderActorView (AActor *actor, bool dontmaplines)
 	}
 
 	WindowLeft = 0;
-	WindowRight = viewwidth - 1;
+	WindowRight = viewwidth;
 	MirrorFlags = 0;
-	ActiveWallMirror = NULL;
+	CurrentPortal = NULL;
+	CurrentPortalUniq = 0;
 
 	r_dontmaplines = dontmaplines;
 	
@@ -798,6 +889,7 @@ void R_RenderActorView (AActor *actor, bool dontmaplines)
 	}
 	// Link the polyobjects right before drawing the scene to reduce the amounts of calls to this function
 	PO_LinkToSubsectors();
+	InSubsector = NULL;
 	R_RenderBSPNode (nodes + numnodes - 1);	// The head node is the last node output.
 	R_3D_ResetClip(); // reset clips (floor/ceiling)
 	camera->renderflags = savedflags;
@@ -809,15 +901,19 @@ void R_RenderActorView (AActor *actor, bool dontmaplines)
 	{
 		PlaneCycles.Clock();
 		R_DrawPlanes ();
-		R_DrawSkyBoxes ();
+		R_DrawPortals ();
 		PlaneCycles.Unclock();
 
 		// [RH] Walk through mirrors
-		size_t lastmirror = WallMirrors.Size ();
-		for (unsigned int i = 0; i < lastmirror; i++)
+		// [ZZ] Merged with portals
+		size_t lastportal = WallPortals.Size();
+		for (unsigned int i = 0; i < lastportal; i++)
 		{
-			R_EnterMirror (drawsegs + WallMirrors[i], 0);
+			R_EnterPortal(&WallPortals[i], 0);
 		}
+
+		CurrentPortal = NULL;
+		CurrentPortalUniq = 0;
 
 		NetUpdate ();
 		
@@ -827,7 +923,7 @@ void R_RenderActorView (AActor *actor, bool dontmaplines)
 
 		NetUpdate ();
 	}
-	WallMirrors.Clear ();
+	WallPortals.Clear ();
 	interpolator.RestoreInterpolations ();
 	R_SetupBuffer ();
 
@@ -852,16 +948,20 @@ void R_RenderViewToCanvas (AActor *actor, DCanvas *canvas,
 {
 	const bool savedviewactive = viewactive;
 
+	R_BeginDrawerCommands();
+
 	viewwidth = width;
 	RenderTarget = canvas;
 	bRenderingToCanvas = true;
 
-	R_SetWindow (12, width, height, height);
+	R_SetWindow (12, width, height, height, true);
 	viewwindowx = x;
 	viewwindowy = y;
 	viewactive = true;
 
 	R_RenderActorView (actor, dontmaplines);
+
+	R_EndDrawerCommands();
 
 	RenderTarget = screen;
 	bRenderingToCanvas = false;
@@ -893,8 +993,6 @@ void R_MultiresInit ()
 // Displays statistics about rendering times
 //
 //==========================================================================
-extern cycle_t WallCycles, PlaneCycles, MaskedCycles, WallScanCycles;
-extern cycle_t FrameCycles;
 
 ADD_STAT (fps)
 {
@@ -955,8 +1053,8 @@ CCMD (clearwallcycles)
 	bestwallcycles = HUGE_VAL;
 }
 
-#if 1
-// To use these, also uncomment the clock/unclock in wallscan
+#if 0
+// The replacement code for Build's wallscan doesn't have any timing calls so this does not work anymore.
 static double bestscancycles = HUGE_VAL;
 
 ADD_STAT (scancycles)
@@ -974,3 +1072,5 @@ CCMD (clearscancycles)
 	bestscancycles = HUGE_VAL;
 }
 #endif
+
+}

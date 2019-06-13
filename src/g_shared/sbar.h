@@ -57,6 +57,9 @@ class AWeapon;
 
 void ST_SetNeedRefresh();
 
+bool ST_IsTimeVisible();
+bool ST_IsLatencyVisible();
+
 // HUD Message base object --------------------------------------------------
 
 class DHUDMessage : public DObject
@@ -68,7 +71,7 @@ public:
 		EColorRange textColor, float holdTime);
 	virtual ~DHUDMessage ();
 
-	virtual void Serialize (FArchive &arc);
+	virtual void Serialize(FSerializer &arc);
 
 	void Draw (int bottom, int visibility);
 	virtual void ResetText (const char *text);
@@ -85,7 +88,7 @@ public:
 	{
 		Style = style;
 	}
-	void SetAlpha(fixed_t alpha)
+	void SetAlpha(float alpha)
 	{
 		Alpha = alpha;
 	}
@@ -124,7 +127,7 @@ protected:
 	EColorRange TextColor;
 	FFont *Font;
 	FRenderStyle Style;
-	fixed_t Alpha;
+	double Alpha;
 
 	void CalcClipCoords(int hudheight);
 	DHUDMessage () : SourceText(NULL) {}
@@ -154,7 +157,7 @@ public:
 	DHUDMessageFadeOut (FFont *font, const char *text, float x, float y, int hudwidth, int hudheight,
 		EColorRange textColor, float holdTime, float fadeOutTime);
 
-	virtual void Serialize (FArchive &arc);
+	virtual void Serialize(FSerializer &arc);
 	virtual void DoDraw (int linenum, int x, int y, bool clean, int hudheight);
 	virtual bool Tick ();
 
@@ -173,7 +176,7 @@ public:
 	DHUDMessageFadeInOut (FFont *font, const char *text, float x, float y, int hudwidth, int hudheight,
 		EColorRange textColor, float holdTime, float fadeInTime, float fadeOutTime);
 
-	virtual void Serialize (FArchive &arc);
+	virtual void Serialize(FSerializer &arc);
 	virtual void DoDraw (int linenum, int x, int y, bool clean, int hudheight);
 	virtual bool Tick ();
 
@@ -192,7 +195,7 @@ public:
 	DHUDMessageTypeOnFadeOut (FFont *font, const char *text, float x, float y, int hudwidth, int hudheight,
 		EColorRange textColor, float typeTime, float holdTime, float fadeOutTime);
 
-	virtual void Serialize (FArchive &arc);
+	virtual void Serialize(FSerializer &arc);
 	virtual void DoDraw (int linenum, int x, int y, bool clean, int hudheight);
 	virtual bool Tick ();
 	virtual void ScreenSizeChanged ();
@@ -261,6 +264,7 @@ class FMugShot
 			DISABLEOUCH = 0x8,
 			DISABLEPAIN = 0x10,
 			DISABLERAMPAGE = 0x20,
+			CUSTOM = 0x40,
 		};
 
 		FMugShot();
@@ -337,7 +341,7 @@ public:
 	};
 
 	DBaseStatusBar (int reltop, int hres=320, int vres=200);
-	void Destroy ();
+	void Destroy() override;
 
 	void SetScaled (bool scale, bool force=false);
 
@@ -346,12 +350,13 @@ public:
 	DHUDMessage *DetachMessage (uint32 id);
 	void DetachAllMessages ();
 	void ShowPlayerName ();
-	fixed_t GetDisplacement () { return Displacement; }
+	double GetDisplacement() { return Displacement; }
 	int GetPlayer ();
 
 	static void AddBlend (float r, float g, float b, float a, float v_blend[4]);
 
-	virtual void Serialize (FArchive &arc);
+	// do not make this a DObject Serialize function because it's not used like one!
+	void SerializeMessages(FSerializer &arc);
 
 	virtual void Tick ();
 	virtual void Draw (EHudState state);
@@ -377,7 +382,6 @@ protected:
 	void UpdateRect (int x, int y, int width, int height) const;
 	void DrawImage (FTexture *image, int x, int y, FRemapTable *translation=NULL) const;
 	void DrawDimImage (FTexture *image, int x, int y, bool dimmed) const;
-	void DrawFadedImage (FTexture *image, int x, int y, fixed_t shade) const;
 	void DrawPartialImage (FTexture *image, int wx, int ww) const;
 
 	void DrINumber (signed int val, int x, int y, int imgBase=imgINumbers) const;
@@ -404,8 +408,8 @@ public:
 	bool Centering;
 	bool FixedOrigin;
 	bool CompleteBorder;
-	fixed_t CrosshairSize;
-	fixed_t Displacement;
+	double CrosshairSize;
+	double Displacement;
 
 	enum
 	{

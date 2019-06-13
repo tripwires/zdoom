@@ -81,12 +81,16 @@ enum ECVarType
 	CVAR_Float,
 	CVAR_String,
 	CVAR_Color,		// stored as CVAR_Int
-	CVAR_Dummy,		// just redirects to another cvar
+	CVAR_DummyBool,		// just redirects to another cvar
+	CVAR_DummyInt,		// just redirects to another cvar
+	CVAR_Dummy,			// Unknown
 	CVAR_GUID
 };
 
 class FConfigFile;
 class AActor;
+
+class FxCVar;
 
 class FBaseCVar
 {
@@ -108,6 +112,7 @@ public:
 
 	virtual ECVarType GetRealType () const = 0;
 
+	virtual const char *GetHumanString(int precision=-1) const;
 	virtual UCVarValue GetGenericRep (ECVarType type) const = 0;
 	virtual UCVarValue GetFavoriteRep (ECVarType *type) const = 0;
 
@@ -185,6 +190,10 @@ void C_BackupCVars (void);
 FBaseCVar *FindCVar (const char *var_name, FBaseCVar **prev);
 FBaseCVar *FindCVarSub (const char *var_name, int namelen);
 
+// Used for ACS and DECORATE.
+FBaseCVar *GetCVar(AActor *activator, const char *cvarname);
+FBaseCVar *GetUserCVar(int playernum, const char *cvarname);
+
 // Create a new cvar with the specified name and type
 FBaseCVar *C_CreateCVar(const char *var_name, ECVarType var_type, DWORD flags);
 
@@ -206,6 +215,7 @@ void C_DeinitConsole();
 
 class FBoolCVar : public FBaseCVar
 {
+	friend class FxCVar;
 public:
 	FBoolCVar (const char *name, bool def, uint32 flags, void (*callback)(FBoolCVar &)=NULL);
 
@@ -231,6 +241,7 @@ protected:
 
 class FIntCVar : public FBaseCVar
 {
+	friend class FxCVar;
 public:
 	FIntCVar (const char *name, int def, uint32 flags, void (*callback)(FIntCVar &)=NULL);
 
@@ -258,6 +269,7 @@ protected:
 
 class FFloatCVar : public FBaseCVar
 {
+	friend class FxCVar;
 public:
 	FFloatCVar (const char *name, float def, uint32 flags, void (*callback)(FFloatCVar &)=NULL);
 
@@ -268,6 +280,7 @@ public:
 	virtual UCVarValue GetGenericRepDefault (ECVarType type) const;
 	virtual UCVarValue GetFavoriteRepDefault (ECVarType *type) const;
 	virtual void SetGenericRepDefault (UCVarValue value, ECVarType type);
+	const char *GetHumanString(int precision) const override;
 
 	float operator= (float floatval)
 		{ UCVarValue val; val.Float = floatval; SetGenericRep (val, CVAR_Float); return floatval; }
@@ -283,6 +296,7 @@ protected:
 
 class FStringCVar : public FBaseCVar
 {
+	friend class FxCVar;
 public:
 	FStringCVar (const char *name, const char *def, uint32 flags, void (*callback)(FStringCVar &)=NULL);
 	~FStringCVar ();
@@ -309,6 +323,7 @@ protected:
 
 class FColorCVar : public FIntCVar
 {
+	friend class FxCVar;
 public:
 	FColorCVar (const char *name, int def, uint32 flags, void (*callback)(FColorCVar &)=NULL);
 
@@ -333,6 +348,7 @@ protected:
 
 class FFlagCVar : public FBaseCVar
 {
+	friend class FxCVar;
 public:
 	FFlagCVar (const char *name, FIntCVar &realvar, uint32 bitval);
 
@@ -361,6 +377,7 @@ protected:
 
 class FMaskCVar : public FBaseCVar
 {
+	friend class FxCVar;
 public:
 	FMaskCVar (const char *name, FIntCVar &realvar, uint32 bitval);
 

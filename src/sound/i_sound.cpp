@@ -135,15 +135,15 @@ public:
 	void SetMusicVolume (float volume)
 	{
 	}
-	SoundHandle LoadSound(BYTE *sfxdata, int length)
+	std::pair<SoundHandle,bool> LoadSound(BYTE *sfxdata, int length, bool monoize)
 	{
 		SoundHandle retval = { NULL };
-		return retval;
+		return std::make_pair(retval, true);
 	}
-	SoundHandle LoadSoundRaw(BYTE *sfxdata, int length, int frequency, int channels, int bits, int loopstart, int loopend)
+	std::pair<SoundHandle,bool> LoadSoundRaw(BYTE *sfxdata, int length, int frequency, int channels, int bits, int loopstart, int loopend, bool monoize)
 	{
 		SoundHandle retval = { NULL };
-		return retval;
+        return std::make_pair(retval, true);
 	}
 	void UnloadSound (SoundHandle sfx)
 	{
@@ -259,7 +259,7 @@ void I_InitSound ()
 	nosfx = !!Args->CheckParm ("-nosfx");
 
 	GSnd = NULL;
-	if (nosound)
+	if (nosound || batchrun)
 	{
 		GSnd = new NullSoundRenderer;
 		I_InitMusic ();
@@ -283,6 +283,7 @@ void I_InitSound ()
 			if ((!GSnd || !GSnd->IsValid()) && IsOpenALPresent())
 			{
 				Printf (TEXTCOLOR_RED"FMod Ex Sound init failed. Trying OpenAL.\n");
+				I_CloseSound();
 				GSnd = new OpenALSoundRenderer;
 				snd_backend = "openal";
 			}
@@ -300,6 +301,7 @@ void I_InitSound ()
 			if ((!GSnd || !GSnd->IsValid()) && IsFModExPresent())
 			{
 				Printf (TEXTCOLOR_RED"OpenAL Sound init failed. Trying FMod Ex.\n");
+				I_CloseSound();
 				GSnd = new FMODSoundRenderer;
 				snd_backend = "fmod";
 			}
@@ -415,7 +417,7 @@ short *SoundRenderer::DecodeSample(int outlen, const void *coded, int sizebytes,
     decoder->getInfo(&srate, &chans, &type);
     if(chans != ChannelConfig_Mono || type != SampleType_Int16)
     {
-        DPrintf("Sample is not 16-bit mono\n");
+        DPrintf(DMSG_WARNING, "Sample is not 16-bit mono\n");
         delete decoder;
         return samples;
     }
@@ -454,7 +456,7 @@ FString SoundStream::GetStats()
 //
 //==========================================================================
 
-SoundHandle SoundRenderer::LoadSoundVoc(BYTE *sfxdata, int length)
+std::pair<SoundHandle,bool> SoundRenderer::LoadSoundVoc(BYTE *sfxdata, int length, bool monoize)
 {
 	BYTE * data = NULL;
 	int len, frequency, channels, bits, loopstart, loopend;
@@ -551,7 +553,7 @@ SoundHandle SoundRenderer::LoadSoundVoc(BYTE *sfxdata, int length)
 				break;
 			default: // Unknown block type
 				okay = false;
-				DPrintf ("Unknown VOC block type %i\n", blocktype);
+				DPrintf (DMSG_ERROR, "Unknown VOC block type %i\n", blocktype);
 				break;
 			}
 			// Move to next block
@@ -598,7 +600,7 @@ SoundHandle SoundRenderer::LoadSoundVoc(BYTE *sfxdata, int length)
 		}
 
 	} while (false);
-	SoundHandle retval = LoadSoundRaw(data, len, frequency, channels, bits, loopstart, loopend);
+	std::pair<SoundHandle,bool> retval = LoadSoundRaw(data, len, frequency, channels, bits, loopstart, loopend, monoize);
 	if (data) delete[] data;
 	return retval;
 }

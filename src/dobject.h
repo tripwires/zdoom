@@ -36,12 +36,14 @@
 
 #include <stdlib.h>
 #include "doomtype.h"
+#include "i_system.h"
 
-struct PClass;
+class PClass;
 
-class FArchive;
+class FSerializer;
 
 class   DObject;
+/*
 class           DArgs;
 class           DCanvas;
 class           DConsoleCommand;
@@ -77,131 +79,119 @@ class                                           DFloor;
 class                                           DFloorWaggle;
 class                                           DPlat;
 class                                   DPillar;
+*/
 
-struct FActorInfo;
+class PClassActor;
 
-enum EMetaType
+#define RUNTIME_CLASS_CASTLESS(cls)	(cls::RegistrationInfo.MyClass)	// Passed a native class name, returns a PClass representing that class
+#define RUNTIME_CLASS(cls)			((cls::MetaClass *)RUNTIME_CLASS_CASTLESS(cls))	// Like above, but returns the true type of the meta object
+#define RUNTIME_TEMPLATE_CLASS(cls)	((typename cls::MetaClass *)RUNTIME_CLASS_CASTLESS(cls))	// RUNTIME_CLASS, but works with templated parameters on GCC
+#define NATIVE_TYPE(object)			(object->StaticType())			// Passed an object, returns the type of the C++ class representing the object
+
+// Enumerations for the meta classes created by ClassReg::RegisterClass()
+enum
 {
-	META_Int,		// An int
-	META_Fixed,		// A fixed point number
-	META_String,	// A string
+	CLASSREG_PClass,
+	CLASSREG_PClassActor,
+	CLASSREG_PClassInventory,
+	CLASSREG_PClassAmmo,
+	CLASSREG_PClassHealth,
+	CLASSREG_PClassPuzzleItem,
+	CLASSREG_PClassWeapon,
+	CLASSREG_PClassPlayerPawn,
+	CLASSREG_PClassType,
+	CLASSREG_PClassClass,
+	CLASSREG_PClassWeaponPiece,
+	CLASSREG_PClassPowerupGiver
 };
-
-class FMetaData
-{
-private:
-	FMetaData (EMetaType type, uint32 id) : Type(type), ID(id) {}
-
-	FMetaData *Next;
-	EMetaType Type;
-	uint32 ID;
-	union
-	{
-		int Int;
-		char *String;
-		fixed_t Fixed;
-	} Value;
-
-	friend class FMetaTable;
-};
-
-class FMetaTable
-{
-public:
-	FMetaTable() : Meta(NULL) {}
-	FMetaTable(const FMetaTable &other);
-	~FMetaTable();
-	FMetaTable &operator = (const FMetaTable &other);
-
-	void SetMetaInt (uint32 id, int parm);
-	void SetMetaFixed (uint32 id, fixed_t parm);
-	void SetMetaString (uint32 id, const char *parm);	// The string is copied
-
-	int GetMetaInt (uint32 id, int def=0) const;
-	fixed_t GetMetaFixed (uint32 id, fixed_t def=0) const;
-	const char *GetMetaString (uint32 id) const;
-
-	FMetaData *FindMeta (EMetaType type, uint32 id) const;
-
-private:
-	FMetaData *Meta;
-	FMetaData *FindMetaDef (EMetaType type, uint32 id);
-	void FreeMeta ();
-	void CopyMeta (const FMetaTable *other);
-};
-
-#define RUNTIME_TYPE(object)	(object->GetClass())	// Passed an object, returns the type of that object
-#define RUNTIME_CLASS(cls)		(&cls::_StaticType)		// Passed a class name, returns a PClass representing that class
-#define NATIVE_TYPE(object)		(object->StaticType())	// Passed an object, returns the type of the C++ class representing the object
 
 struct ClassReg
 {
 	PClass *MyClass;
 	const char *Name;
-	PClass *ParentType;
-	unsigned int SizeOf;
+	ClassReg *ParentType;
+	ClassReg *_VMExport;
 	const size_t *Pointers;
 	void (*ConstructNative)(void *);
+	void(*InitNatives)();
+	unsigned int SizeOf:28;
+	unsigned int MetaClassNum:4;
 
-	void RegisterClass() const;
+	PClass *RegisterClass();
+	void SetupClass(PClass *cls);
 };
 
 enum EInPlace { EC_InPlace };
 
 #define DECLARE_ABSTRACT_CLASS(cls,parent) \
 public: \
-	static PClass _StaticType; \
-	virtual PClass *StaticType() const { return &_StaticType; } \
-	static ClassReg RegistrationInfo, *RegistrationInfoPtr; \
-private: \
+	virtual PClass *StaticType() const; \
+	static ClassReg RegistrationInfo, * const RegistrationInfoPtr; \
 	typedef parent Super; \
+private: \
 	typedef cls ThisClass;
+
+#define DECLARE_ABSTRACT_CLASS_WITH_META(cls,parent,meta) \
+	DECLARE_ABSTRACT_CLASS(cls,parent) \
+public: \
+	typedef meta MetaClass; \
+	MetaClass *GetClass() const { return static_cast<MetaClass *>(DObject::GetClass()); } \
+protected: \
+	enum { MetaClassNum = CLASSREG_##meta }; private: \
 
 #define DECLARE_CLASS(cls,parent) \
 	DECLARE_ABSTRACT_CLASS(cls,parent) \
 		private: static void InPlaceConstructor (void *mem);
 
+#define DECLARE_CLASS_WITH_META(cls,parent,meta) \
+	DECLARE_ABSTRACT_CLASS_WITH_META(cls,parent,meta) \
+		private: static void InPlaceConstructor (void *mem);
+
 #define HAS_OBJECT_POINTERS \
 	static const size_t PointerOffsets[];
 
-// Taking the address of a field in an object at address 1 instead of
-// address 0 keeps GCC from complaining about possible misuse of offsetof.
-#define DECLARE_POINTER(field)	(size_t)&((ThisClass*)1)->field - 1,
-#define END_POINTERS			~(size_t)0 };
-
 #if defined(_MSC_VER)
-#	pragma data_seg(".creg$u")
-#	pragma data_seg()
-#	define _DECLARE_TI(cls) __declspec(allocate(".creg$u")) ClassReg *cls::RegistrationInfoPtr = &cls::RegistrationInfo;
+#	pragma section(".creg$u",read)
+#	define _DECLARE_TI(cls) __declspec(allocate(".creg$u")) ClassReg * const cls::RegistrationInfoPtr = &cls::RegistrationInfo;
 #else
-#	define _DECLARE_TI(cls) ClassReg *cls::RegistrationInfoPtr __attribute__((section(SECTION_CREG))) = &cls::RegistrationInfo;
+#	define _DECLARE_TI(cls) ClassReg * const cls::RegistrationInfoPtr __attribute__((section(SECTION_CREG))) = &cls::RegistrationInfo;
 #endif
 
-#define _IMP_PCLASS(cls,ptrs,create) \
-	PClass cls::_StaticType; \
+#define _IMP_PCLASS(cls, ptrs, create) \
 	ClassReg cls::RegistrationInfo = {\
-		RUNTIME_CLASS(cls), \
+		nullptr, \
 		#cls, \
-		RUNTIME_CLASS(cls::Super), \
-		sizeof(cls), \
+		&cls::Super::RegistrationInfo, \
+		nullptr, \
 		ptrs, \
-		create }; \
-	_DECLARE_TI(cls)
+		create, \
+		nullptr, \
+		sizeof(cls), \
+		cls::MetaClassNum }; \
+	_DECLARE_TI(cls) \
+	PClass *cls::StaticType() const { return RegistrationInfo.MyClass; }
 
-#define _IMP_CREATE_OBJ(cls) \
-	void cls::InPlaceConstructor(void *mem) { new((EInPlace *)mem) cls; }
+#define IMPLEMENT_CLASS(cls, isabstract, ptrs) \
+	_X_CONSTRUCTOR_##isabstract(cls) \
+	_IMP_PCLASS(cls, _X_POINTERS_##ptrs(cls), _X_ABSTRACT_##isabstract(cls))
 
-#define IMPLEMENT_POINTY_CLASS(cls) \
-	_IMP_CREATE_OBJ(cls) \
-	_IMP_PCLASS(cls,cls::PointerOffsets,cls::InPlaceConstructor) \
-	const size_t cls::PointerOffsets[] = {
+// Taking the address of a field in an object at address 1 instead of
+// address 0 keeps GCC from complaining about possible misuse of offsetof.
+#define IMPLEMENT_POINTERS_START(cls)	const size_t cls::PointerOffsets[] = {
+#define IMPLEMENT_POINTER(field)		(size_t)&((ThisClass*)1)->field - 1,
+#define IMPLEMENT_POINTERS_END			~(size_t)0 };
 
-#define IMPLEMENT_CLASS(cls) \
-	_IMP_CREATE_OBJ(cls) \
-	_IMP_PCLASS(cls,NULL,cls::InPlaceConstructor) 
-
-#define IMPLEMENT_ABSTRACT_CLASS(cls) \
-	_IMP_PCLASS(cls,NULL,NULL)
+// Possible arguments for the IMPLEMENT_CLASS macro
+#define _X_POINTERS_true(cls)		cls::PointerOffsets
+#define _X_POINTERS_false(cls)		nullptr
+#define _X_FIELDS_true(cls)			nullptr
+#define _X_FIELDS_false(cls)		nullptr
+#define _X_CONSTRUCTOR_true(cls)
+#define _X_CONSTRUCTOR_false(cls)	void cls::InPlaceConstructor(void *mem) { new((EInPlace *)mem) cls; }
+#define _X_ABSTRACT_true(cls)		nullptr
+#define _X_ABSTRACT_false(cls)		cls::InPlaceConstructor
+#define _X_VMEXPORT_true(cls)		nullptr
+#define _X_VMEXPORT_false(cls)		nullptr
 
 enum EObjectFlags
 {
@@ -222,6 +212,8 @@ enum EObjectFlags
 	OF_JustSpawned		= 1 << 8,		// Thinker was spawned this tic
 	OF_SerialSuccess	= 1 << 9,		// For debugging Serialize() calls
 	OF_Sentinel			= 1 << 10,		// Object is serving as the sentinel in a ring list
+	OF_Transient		= 1 << 11,		// Object should not be archived (references to it will be nulled on disk)
+	OF_SuperCall		= 1 << 12,		// A super call from the VM is about to be performed
 };
 
 template<class T> class TObjPtr;
@@ -262,6 +254,9 @@ namespace GC
 
 	// Size of GC steps.
 	extern int StepMul;
+
+	// Is this the final collection just before exit?
+	extern bool FinalGC;
 
 	// Current white value for known-dead objects.
 	static inline uint32 OtherWhite()
@@ -314,6 +309,9 @@ namespace GC
 	// is NULLed instead.
 	void Mark(DObject **obj);
 
+	// Marks an array of objects.
+	void MarkArray(DObject **objs, size_t count);
+
 	// For cleanup
 	void DelSoftRootHead();
 
@@ -335,6 +333,15 @@ namespace GC
 		obj = t;
 	}
 	template<class T> void Mark(TObjPtr<T> &obj);
+
+	template<class T> void MarkArray(T **obj, size_t count)
+	{
+		MarkArray((DObject **)(obj), count);
+	}
+	template<class T> void MarkArray(TArray<T> &arr)
+	{
+		MarkArray(&arr[0], arr.Size());
+	}
 }
 
 // A template class to help with handling read barriers. It does not
@@ -411,15 +418,11 @@ public:
 		return GC::ReadBarrier(p) == u;
 	}
 
-	template<class U> friend inline FArchive &operator<<(FArchive &arc, TObjPtr<U> &o);
 	template<class U> friend inline void GC::Mark(TObjPtr<U> &obj);
+	template<class U> friend FSerializer &Serialize(FSerializer &arc, const char *key, TObjPtr<U> &value, TObjPtr<U> *);
+
 	friend class DObject;
 };
-
-template<class T> inline FArchive &operator<<(FArchive &arc, TObjPtr<T> &o)
-{
-	return arc << o.p;
-}
 
 // Use barrier_cast instead of static_cast when you need to cast
 // the contents of a TObjPtr to a related type.
@@ -436,12 +439,14 @@ template<class T> inline void GC::Mark(TObjPtr<T> &obj)
 class DObject
 {
 public:
-	static PClass _StaticType;
-	virtual PClass *StaticType() const { return &_StaticType; }
-	static ClassReg RegistrationInfo, *RegistrationInfoPtr;
+	virtual PClass *StaticType() const { return RegistrationInfo.MyClass; }
+	static ClassReg RegistrationInfo, * const RegistrationInfoPtr;
 	static void InPlaceConstructor (void *mem);
+	typedef PClass MetaClass;
 private:
 	typedef DObject ThisClass;
+protected:
+	enum { MetaClassNum = CLASSREG_PClass };
 
 	// Per-instance variables. There are four.
 private:
@@ -459,20 +464,25 @@ public:
 	inline bool IsKindOf (const PClass *base) const;
 	inline bool IsA (const PClass *type) const;
 
-	void SerializeUserVars(FArchive &arc);
-	virtual void Serialize (FArchive &arc);
+	void SerializeUserVars(FSerializer &arc);
+	virtual void Serialize(FSerializer &arc);
+
+	void ClearClass()
+	{
+		Class = NULL;
+	}
 
 	// For catching Serialize functions in derived classes
 	// that don't call their base class.
 	void CheckIfSerialized () const;
 
-	virtual void Destroy ();
+	virtual void Destroy();
 
 	// If you need to replace one object with another and want to
 	// change any pointers from the old object to the new object,
 	// use this method.
 	virtual size_t PointerSubstitution (DObject *old, DObject *notOld);
-	static size_t StaticPointerSubstitution (DObject *old, DObject *notOld);
+	static size_t StaticPointerSubstitution (DObject *old, DObject *notOld, bool scandefaults = false);
 
 	PClass *GetClass() const
 	{
@@ -568,6 +578,11 @@ protected:
 	}
 };
 
+class AInventory;//
+
+// When you write to a pointer to an Object, you must call this for
+// proper bookkeeping in case the Object holding this pointer has
+// already been processed by the GC.
 static inline void GC::WriteBarrier(DObject *pointing, DObject *pointed)
 {
 	if (pointed != NULL && pointed->IsWhite() && pointing->IsBlack())
@@ -594,6 +609,20 @@ inline bool DObject::IsKindOf (const PClass *base) const
 inline bool DObject::IsA (const PClass *type) const
 {
 	return (type == GetClass());
+}
+
+template<class T> T *dyn_cast(DObject *p)
+{
+	if (p != NULL && p->IsKindOf(RUNTIME_CLASS_CASTLESS(T)))
+	{
+		return static_cast<T *>(p);
+	}
+	return NULL;
+}
+
+template<class T> const T *dyn_cast(const DObject *p)
+{
+	return dyn_cast<T>(const_cast<DObject *>(p));
 }
 
 #endif //__DOBJECT_H__

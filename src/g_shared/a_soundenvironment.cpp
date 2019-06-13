@@ -46,20 +46,20 @@ public:
 	void Activate (AActor *deactivator);
 };
 
-IMPLEMENT_CLASS (ASoundEnvironment)
+IMPLEMENT_CLASS(ASoundEnvironment, false, false)
 
 void ASoundEnvironment::PostBeginPlay ()
 {
 	Super::PostBeginPlay ();
 	if (!(flags2 & MF2_DORMANT))
 	{
-		Activate (this);
+		CallActivate (this);
 	}
 }
 
 void ASoundEnvironment::Activate (AActor *activator)
 {
-	zones[Sector->ZoneNumber].Environment = S_FindEnvironment ((args[0]<<8) | (args[1]));
+	Zones[Sector->ZoneNumber].Environment = S_FindEnvironment ((args[0]<<8) | (args[1]));
 }
 
 // Deactivate just exists so that you can flag the thing as dormant in an editor

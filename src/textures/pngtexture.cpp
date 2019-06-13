@@ -66,10 +66,13 @@ protected:
 	FString SourceFile;
 	BYTE *Pixels;
 	Span **Spans;
+	FileReader *fr;
 
 	BYTE BitDepth;
 	BYTE ColorType;
 	BYTE Interlace;
+	bool HaveTrans;
+	WORD NonPaletteTrans[3];
 
 	BYTE *PaletteMap;
 	int PaletteSize;
@@ -195,7 +198,7 @@ FTexture *PNGTexture_CreateFromFile(PNGHandle *png, const FString &filename)
 FPNGTexture::FPNGTexture (FileReader &lump, int lumpnum, const FString &filename, int width, int height,
 						  BYTE depth, BYTE colortype, BYTE interlace)
 : FTexture(NULL, lumpnum), SourceFile(filename), Pixels(0), Spans(0),
-  BitDepth(depth), ColorType(colortype), Interlace(interlace),
+  BitDepth(depth), ColorType(colortype), Interlace(interlace), HaveTrans(false),
   PaletteMap(0), PaletteSize(0), StartOfIDAT(0)
 {
 	union
@@ -204,9 +207,11 @@ FPNGTexture::FPNGTexture (FileReader &lump, int lumpnum, const FString &filename
 		BYTE pngpal[256][3];
 	} p;
 	BYTE trans[256];
-	bool havetRNS = false;
 	DWORD len, id;
 	int i;
+
+	if (lumpnum == -1) fr = &lump;
+	else fr = nullptr;
 
 	UseType = TEX_MiscPatch;
 	LeftOffset = 0;
@@ -273,7 +278,11 @@ FPNGTexture::FPNGTexture (FileReader &lump, int lumpnum, const FString &filename
 
 		case MAKE_ID('t','R','N','S'):
 			lump.Read (trans, len);
-			havetRNS = true;
+			HaveTrans = true;
+			// Save for colortype 2
+			NonPaletteTrans[0] = WORD(trans[0] * 256 + trans[1]);
+			NonPaletteTrans[1] = WORD(trans[2] * 256 + trans[3]);
+			NonPaletteTrans[2] = WORD(trans[4] * 256 + trans[5]);
 			break;
 
 		case MAKE_ID('a','l','P','h'):
@@ -297,13 +306,13 @@ FPNGTexture::FPNGTexture (FileReader &lump, int lumpnum, const FString &filename
 	case 0:		// Grayscale
 		if (!bAlphaTexture)
 		{
-			if (colortype == 0 && havetRNS && trans[0] != 0)
+			if (colortype == 0 && HaveTrans && NonPaletteTrans[0] < 256)
 			{
 				bMasked = true;
 				PaletteSize = 256;
 				PaletteMap = new BYTE[256];
 				memcpy (PaletteMap, GrayMap, 256);
-				PaletteMap[trans[0]] = 0;
+				PaletteMap[NonPaletteTrans[0]] = 0;
 			}
 			else
 			{
@@ -327,6 +336,10 @@ FPNGTexture::FPNGTexture (FileReader &lump, int lumpnum, const FString &filename
 
 	case 6:		// RGB + Alpha
 		bMasked = true;
+		break;
+
+	case 2:		// RGB
+		bMasked = HaveTrans;
 		break;
 	}
 }
@@ -453,7 +466,7 @@ void FPNGTexture::MakeTexture ()
 	}
 	else
 	{
-		lump = new FileReader(SourceFile.GetChars());
+		lump = fr;// new FileReader(SourceFile.GetChars());
 	}
 
 	Pixels = new BYTE[Width*Height];
@@ -521,7 +534,23 @@ void FPNGTexture::MakeTexture ()
 				{
 					for (y = Height; y > 0; --y)
 					{
-						*out++ = RGB32k.RGB[in[0]>>3][in[1]>>3][in[2]>>3];
+						if (!HaveTrans)
+						{
+							*out++ = RGB256k.RGB[in[0]>>2][in[1]>>2][in[2]>>2];
+						}
+						else
+						{
+							if (in[0] == NonPaletteTrans[0] &&
+								in[1] == NonPaletteTrans[1] &&
+								in[2] == NonPaletteTrans[2])
+							{
+								*out++ = 0;
+							}
+							else
+							{
+								*out++ = RGB256k.RGB[in[0]>>2][in[1]>>2][in[2]>>2];
+							}
+						}
 						in += pitch;
 					}
 					in -= backstep;
@@ -564,7 +593,7 @@ void FPNGTexture::MakeTexture ()
 				{
 					for (y = Height; y > 0; --y)
 					{
-						*out++ = in[3] < 128 ? 0 : RGB32k.RGB[in[0]>>3][in[1]>>3][in[2]>>3];
+						*out++ = in[3] < 128 ? 0 : RGB256k.RGB[in[0]>>2][in[1]>>2][in[2]>>2];
 						in += pitch;
 					}
 					in -= backstep;
@@ -574,7 +603,7 @@ void FPNGTexture::MakeTexture ()
 			delete[] tempix;
 		}
 	}
-	delete lump;
+	if (lump != fr) delete lump;
 }
 
 //===========================================================================
@@ -599,7 +628,7 @@ int FPNGTexture::CopyTrueColorPixels(FBitmap *bmp, int x, int y, int rotate, FCo
 	}
 	else
 	{
-		lump = new FileReader(SourceFile.GetChars());
+		lump = fr;// new FileReader(SourceFile.GetChars());
 	}
 
 	lump->Seek(33, SEEK_SET);
@@ -625,11 +654,18 @@ int FPNGTexture::CopyTrueColorPixels(FBitmap *bmp, int x, int y, int rotate, FCo
 			break;
 
 		case MAKE_ID('t','R','N','S'):
-			for(DWORD i = 0; i < len; i++)
+			if (ColorType == 3)
 			{
-				(*lump) >> pe[i].a;
-				if (pe[i].a != 0 && pe[i].a != 255)
-					transpal = true;
+				for(DWORD i = 0; i < len; i++)
+				{
+					(*lump) >> pe[i].a;
+					if (pe[i].a != 0 && pe[i].a != 255)
+						transpal = true;
+				}
+			}
+			else
+			{
+				lump->Seek(len, SEEK_CUR);
 			}
 			break;
 		}
@@ -639,13 +675,19 @@ int FPNGTexture::CopyTrueColorPixels(FBitmap *bmp, int x, int y, int rotate, FCo
 		lump->Read(&id, 4);
 	}
 
+	if (ColorType == 0 && HaveTrans && NonPaletteTrans[0] < 256)
+	{
+		pe[NonPaletteTrans[0]].a = 0;
+		transpal = true;
+	}
+
 	BYTE * Pixels = new BYTE[pixwidth * Height];
 
 	lump->Seek (StartOfIDAT, SEEK_SET);
 	lump->Read(&len, 4);
 	lump->Read(&id, 4);
 	M_ReadIDAT (lump, Pixels, Width, Height, pixwidth, BitDepth, ColorType, Interlace, BigLong((unsigned int)len));
-	delete lump;
+	if (lump != fr) delete lump;
 
 	switch (ColorType)
 	{
@@ -655,7 +697,16 @@ int FPNGTexture::CopyTrueColorPixels(FBitmap *bmp, int x, int y, int rotate, FCo
 		break;
 
 	case 2:
-		bmp->CopyPixelDataRGB(x, y, Pixels, Width, Height, 3, pixwidth, rotate, CF_RGB, inf);
+		if (!HaveTrans)
+		{
+			bmp->CopyPixelDataRGB(x, y, Pixels, Width, Height, 3, pixwidth, rotate, CF_RGB, inf);
+		}
+		else
+		{
+			bmp->CopyPixelDataRGB(x, y, Pixels, Width, Height, 3, pixwidth, rotate, CF_RGBT, inf,
+				NonPaletteTrans[0], NonPaletteTrans[1], NonPaletteTrans[2]);
+			transpal = true;
+		}
 		break;
 
 	case 4:

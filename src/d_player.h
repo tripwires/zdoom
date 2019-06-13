@@ -30,6 +30,7 @@
 #include "doomstat.h"
 
 #include "a_artifacts.h"
+#include "a_weapons.h"
 
 // The player data structure depends on a number
 // of other structs: items (internal inventory),
@@ -44,68 +45,96 @@
 //Added by MC:
 #include "b_bot.h"
 
-enum
-{
-	APMETA_BASE = 0x95000,
+class player_t;
 
-	APMETA_DisplayName,		// display name (used in menus etc.)
-	APMETA_SoundClass,		// sound class
-	APMETA_Face,			// doom status bar face (when used)
-	APMETA_ColorRange,		// skin color range
-	APMETA_InvulMode,
-	APMETA_HealingRadius,
-	APMETA_Portrait,
-	APMETA_Hexenarmor0,
-	APMETA_Hexenarmor1,
-	APMETA_Hexenarmor2,
-	APMETA_Hexenarmor3,
-	APMETA_Hexenarmor4,
-	APMETA_Slot0,
-	APMETA_Slot1,
-	APMETA_Slot2,
-	APMETA_Slot3,
-	APMETA_Slot4,
-	APMETA_Slot5,
-	APMETA_Slot6,
-	APMETA_Slot7,
-	APMETA_Slot8,
-	APMETA_Slot9,
+// Standard pre-defined skin colors
+struct FPlayerColorSet
+{
+	struct ExtraRange
+	{
+		BYTE RangeStart, RangeEnd;	// colors to remap
+		BYTE FirstColor, LastColor;	// colors to map to
+	};
+
+	FName Name;			// Name of this color
+
+	int Lump;			// Lump to read the translation from, otherwise use next 2 fields
+	BYTE FirstColor, LastColor;		// Describes the range of colors to use for the translation
+
+	BYTE RepresentativeColor;		// A palette entry representative of this translation,
+									// for map arrows and status bar backgrounds and such
+	BYTE NumExtraRanges;
+	ExtraRange Extra[6];
 };
 
-FPlayerColorSet *P_GetPlayerColorSet(FName classname, int setnum);
-void P_EnumPlayerColorSets(FName classname, TArray<int> *out);
-const char *GetPrintableDisplayName(const PClass *cls);
+typedef TMap<int, FPlayerColorSet> FPlayerColorSetMap;
+typedef TMap<FName, PalEntry> PainFlashList;
+
+class PClassPlayerPawn : public PClassActor
+{
+	DECLARE_CLASS(PClassPlayerPawn, PClassActor);
+protected:
+public:
+	PClassPlayerPawn();
+	virtual void DeriveData(PClass *newclass);
+	void EnumColorSets(TArray<int> *out);
+	FPlayerColorSet *GetColorSet(int setnum) { return ColorSets.CheckKey(setnum); }
+	void SetPainFlash(FName type, PalEntry color);
+	bool GetPainFlash(FName type, PalEntry *color) const;
+
+	FString DisplayName;	// Display name (used in menus, etc.)
+	FString SoundClass;		// Sound class
+	FString Face;			// Doom status bar face (when used)
+	FString Portrait;
+	FString Slot[10];
+	FName InvulMode;
+	FName HealingRadiusType;
+	double HexenArmor[5];
+	BYTE ColorRangeStart;	// Skin color range
+	BYTE ColorRangeEnd;
+	FPlayerColorSetMap ColorSets;
+	PainFlashList PainFlashes;
+};
+FString GetPrintableDisplayName(PClassPlayerPawn *cls);
 
 class APlayerPawn : public AActor
 {
-	DECLARE_CLASS (APlayerPawn, AActor)
+	DECLARE_CLASS_WITH_META(APlayerPawn, AActor, PClassPlayerPawn)
 	HAS_OBJECT_POINTERS
 public:
-	virtual void Serialize (FArchive &arc);
+	
+	virtual void Serialize(FSerializer &arc);
 
-	virtual void PostBeginPlay();
-	virtual void Tick();
-	virtual void AddInventory (AInventory *item);
-	virtual void RemoveInventory (AInventory *item);
-	virtual bool UseInventory (AInventory *item);
-	virtual void MarkPrecacheSounds () const;
+	virtual void PostBeginPlay() override;
+	virtual void Tick() override;
+	virtual void AddInventory (AInventory *item) override;
+	virtual void RemoveInventory (AInventory *item) override;
+	virtual bool UseInventory (AInventory *item) override;
+	virtual void MarkPrecacheSounds () const override;
+	virtual void BeginPlay () override;
+	virtual void Die (AActor *source, AActor *inflictor, int dmgflags) override;
+	virtual bool UpdateWaterLevel (bool splash) override;
 
-	virtual void PlayIdle ();
-	virtual void PlayRunning ();
-	virtual void ThrowPoisonBag ();
-	virtual void TweakSpeeds (int &forwardmove, int &sidemove);
-	virtual void MorphPlayerThink ();
-	virtual void ActivateMorphWeapon ();
-	AWeapon *PickNewWeapon (const PClass *ammotype);
-	AWeapon *BestWeapon (const PClass *ammotype);
-	void CheckWeaponSwitch(const PClass *ammotype);
-	virtual void GiveDeathmatchInventory ();
-	virtual void FilterCoopRespawnInventory (APlayerPawn *oldplayer);
+	bool ResetAirSupply (bool playgasp = true);
+	int GetMaxHealth() const;
+	void TweakSpeeds (double &forwardmove, double &sidemove);
+	void MorphPlayerThink ();
+	void ActivateMorphWeapon ();
+	AWeapon *PickNewWeapon (PClassAmmo *ammotype);
+	AWeapon *BestWeapon (PClassAmmo *ammotype);
+	void CheckWeaponSwitch(PClassAmmo *ammotype);
+	void GiveDeathmatchInventory ();
+	void FilterCoopRespawnInventory (APlayerPawn *oldplayer);
 
 	void SetupWeaponSlots ();
 	void GiveDefaultInventory ();
+
+	// These are virtual on the script side only.
+	void PlayIdle();
+	void PlayRunning();
 	void PlayAttacking ();
 	void PlayAttacking2 ();
+
 	const char *GetSoundClass () const;
 
 	enum EInvulState
@@ -116,8 +145,6 @@ public:
 		INVUL_GetAlpha
 	};
 
-	void BeginPlay ();
-	void Die (AActor *source, AActor *inflictor, int dmgflags);
 
 	int			crouchsprite;
 	int			MaxHealth;
@@ -128,27 +155,27 @@ public:
 	TObjPtr<AInventory> InvSel;			// selected inventory item
 
 	// [GRB] Player class properties
-	fixed_t		JumpZ;
-	fixed_t		GruntSpeed;
-	fixed_t		FallingScreamMinSpeed, FallingScreamMaxSpeed;
-	fixed_t		ViewHeight;
-	fixed_t		ForwardMove1, ForwardMove2;
-	fixed_t		SideMove1, SideMove2;
+	double		JumpZ;
+	double		GruntSpeed;
+	double		FallingScreamMinSpeed, FallingScreamMaxSpeed;
+	double		ViewHeight;
+	double		ForwardMove1, ForwardMove2;
+	double		SideMove1, SideMove2;
 	FTextureID	ScoreIcon;
 	int			SpawnMask;
 	FNameNoInit	MorphWeapon;
-	fixed_t		AttackZOffset;			// attack height, relative to player center
-	fixed_t		UseRange;				// [NS] Distance at which player can +use
-	fixed_t		AirCapacity;			// Multiplier for air supply underwater.
-	const PClass *FlechetteType;
+	double		AttackZOffset;			// attack height, relative to player center
+	double		UseRange;				// [NS] Distance at which player can +use
+	double		AirCapacity;			// Multiplier for air supply underwater.
+	PClassActor *FlechetteType;
+
 
 	// [CW] Fades for when you are being damaged.
 	PalEntry DamageFade;
 
-	bool UpdateWaterLevel (fixed_t oldz, bool splash);
-	bool ResetAirSupply (bool playgasp = true);
+	// [SP] ViewBob Multiplier
+	double		ViewBob;
 
-	int GetMaxHealth() const;
 };
 
 class APlayerChunk : public APlayerPawn
@@ -227,11 +254,10 @@ enum
 	WF_USER4OK			= 1 << 11,
 };
 
-#define WPIECE1		1
-#define WPIECE2		2
-#define WPIECE3		4
-
-#define WP_NOCHANGE ((AWeapon*)~0)
+// The VM cannot deal with this as an invalid pointer because it performs a read barrier on every object pointer read.
+// This doesn't have to point to a valid weapon, though, because WP_NOCHANGE is never dereferenced, but it must point to a valid object
+// and the class descriptor just works fine for that.
+#define WP_NOCHANGE ((AWeapon*)RUNTIME_CLASS_CASTLESS(AWeapon))
 
 
 #define MAXPLAYERNAME	15
@@ -251,7 +277,7 @@ public:
 
 	bool CheckSkin (int skin);
 
-	const PClass *Type;
+	PClassPlayerPawn *Type;
 	DWORD Flags;
 	TArray<int> Skins;
 };
@@ -270,7 +296,7 @@ struct userinfo_t : TMap<FName,FBaseCVar *>
 {
 	~userinfo_t();
 
-	int GetAimDist() const
+	double GetAimDist() const
 	{
 		if (dmflags2 & DF2_NOAUTOAIM)
 		{
@@ -280,11 +306,11 @@ struct userinfo_t : TMap<FName,FBaseCVar *>
 		float aim = *static_cast<FFloatCVar *>(*CheckKey(NAME_Autoaim));
 		if (aim > 35 || aim < 0)
 		{
-			return ANGLE_1*35;
+			return 35.;
 		}
 		else
 		{
-			return xs_RoundToInt(fabs(aim * ANGLE_1));
+			return aim;
 		}
 	}
 	const char *GetName() const
@@ -307,19 +333,23 @@ struct userinfo_t : TMap<FName,FBaseCVar *>
 	{
 		return *static_cast<FBoolCVar *>(*CheckKey(NAME_NeverSwitchOnPickup));
 	}
-	fixed_t GetMoveBob() const
+	double GetMoveBob() const
 	{
-		return FLOAT2FIXED(*static_cast<FFloatCVar *>(*CheckKey(NAME_MoveBob)));
+		return *static_cast<FFloatCVar *>(*CheckKey(NAME_MoveBob));
 	}
-	fixed_t GetStillBob() const
+	double GetStillBob() const
 	{
-		return FLOAT2FIXED(*static_cast<FFloatCVar *>(*CheckKey(NAME_StillBob)));
+		return *static_cast<FFloatCVar *>(*CheckKey(NAME_StillBob));
+	}
+	float GetWBobSpeed() const
+	{
+		return *static_cast<FFloatCVar *>(*CheckKey(NAME_WBobSpeed));
 	}
 	int GetPlayerClassNum() const
 	{
 		return *static_cast<FIntCVar *>(*CheckKey(NAME_PlayerClass));
 	}
-	const PClass *GetPlayerClassType() const
+	PClassPlayerPawn *GetPlayerClassType() const
 	{
 		return PlayerClasses[GetPlayerClassNum()].Type;
 	}
@@ -348,8 +378,8 @@ struct userinfo_t : TMap<FName,FBaseCVar *>
 	int ColorSetChanged(int setnum);
 };
 
-void ReadUserInfo(FArchive &arc, userinfo_t &info, FString &skin);
-void WriteUserInfo(FArchive &arc, userinfo_t &info);
+void ReadUserInfo(FSerializer &arc, userinfo_t &info, FString &skin);
+void WriteUserInfo(FSerializer &arc, userinfo_t &info);
 
 //
 // Extended player object info: player_t
@@ -358,9 +388,10 @@ class player_t
 {
 public:
 	player_t();
+	~player_t();
 	player_t &operator= (const player_t &p);
 
-	void Serialize (FArchive &arc);
+	void Serialize(FSerializer &arc);
 	size_t FixPointers (const DObject *obj, DObject *replacement);
 	size_t PropagateMark();
 
@@ -376,20 +407,20 @@ public:
 
 	userinfo_t	userinfo;				// [RH] who is this?
 	
-	const PClass *cls;					// class of associated PlayerPawn
+	PClassPlayerPawn *cls;				// class of associated PlayerPawn
 
 	float		DesiredFOV;				// desired field of vision
 	float		FOV;					// current field of vision
-	fixed_t		viewz;					// focal origin above r.z
-	fixed_t		viewheight;				// base height above floor for viewz
-	fixed_t		deltaviewheight;		// squat speed.
-	fixed_t		bob;					// bounded/scaled total velocity
+	double		viewz;					// focal origin above r.z
+	double		viewheight;				// base height above floor for viewz
+	double		deltaviewheight;		// squat speed.
+	double		bob;					// bounded/scaled total velocity
 
 	// killough 10/98: used for realistic bobbing (i.e. not simply overall speed)
 	// mo->velx and mo->vely represent true velocity experienced by player.
 	// This only represents the thrust that the player applies himself.
 	// This avoids anomalies with such things as Boom ice and conveyors.
-	fixed_t		velx, vely;				// killough 10/98
+	DVector2 Vel;
 
 	bool		centering;
 	BYTE		turnticks;
@@ -413,6 +444,7 @@ public:
 
 	AWeapon	   *ReadyWeapon;
 	AWeapon	   *PendingWeapon;			// WP_NOCHANGE if not changing
+	TObjPtr<DPSprite> psprites; // view sprites (gun, etc)
 
 	int			cheats;					// bit flags
 	int			timefreezer;			// Player has an active time freezer
@@ -432,11 +464,10 @@ public:
 	int			extralight;				// so gun flashes light up areas
 	short		fixedcolormap;			// can be set to REDCOLORMAP, etc.
 	short		fixedlightlevel;
-	pspdef_t	psprites[NUMPSPRITES];	// view sprites (gun, etc)
 	int			morphTics;				// player is a chicken/pig if > 0
-	const PClass *MorphedPlayerClass;		// [MH] (for SBARINFO) class # for this player instance when morphed
+	PClassPlayerPawn *MorphedPlayerClass;		// [MH] (for SBARINFO) class # for this player instance when morphed
 	int			MorphStyle;				// which effects to apply for this player instance when morphed
-	const PClass *MorphExitFlash;		// flash to apply when demorphing (cache of value given to P_MorphPlayer)
+	PClassActor *MorphExitFlash;		// flash to apply when demorphing (cache of value given to P_MorphPlayer)
 	TObjPtr<AWeapon>	PremorphWeapon;		// ready weapon before morphing
 	int			chickenPeck;			// chicken peck countdown
 	int			jumpTics;				// delay the next jump for a moment
@@ -466,32 +497,36 @@ public:
 
 	FString		LogText;	// [RH] Log for Strife
 
-	int			MinPitch;	// Viewpitch limits (negative is up, positive is down)
-	int			MaxPitch;
+	DAngle			MinPitch;	// Viewpitch limits (negative is up, positive is down)
+	DAngle			MaxPitch;
 
-	fixed_t crouchfactor;
-	fixed_t crouchoffset;
-	fixed_t crouchviewdelta;
+	double crouchfactor;
+	double crouchoffset;
+	double crouchviewdelta;
 
 	FWeaponSlots weapons;
 
 	// [CW] I moved these here for multiplayer conversation support.
 	TObjPtr<AActor> ConversationNPC, ConversationPC;
-	angle_t ConversationNPCAngle;
+	DAngle ConversationNPCAngle;
 	bool ConversationFaceTalker;
 
-	fixed_t GetDeltaViewHeight() const
+	double GetDeltaViewHeight() const
 	{
-		return (mo->ViewHeight + crouchviewdelta - viewheight) >> 3;
+		return (mo->ViewHeight + crouchviewdelta - viewheight) / 8;
 	}
 
 	void Uncrouch()
 	{
-		crouchfactor = FRACUNIT;
-		crouchoffset = 0;
-		crouchdir = 0;
-		crouching = 0;
-		crouchviewdelta = 0;
+		if (crouchfactor != 1)
+		{
+			crouchfactor = 1;
+			crouchoffset = 0;
+			crouchdir = 0;
+			crouching = 0;
+			crouchviewdelta = 0;
+			viewheight = mo->ViewHeight;
+		}
 	}
 	
 	bool CanCrouch() const
@@ -500,14 +535,21 @@ public:
 	}
 
 	int GetSpawnClass();
+
+	// PSprite layers
+	void TickPSprites();
+	void DestroyPSprites();
+	DPSprite *FindPSprite(int layer);
+	// Used ONLY for compatibility with the old hardcoded layers.
+	// Make sure that a state is properly set after calling this unless
+	// you are 100% sure the context already implies the layer exists.
+	DPSprite *GetPSprite(PSPLayers layer);
 };
 
 // Bookkeeping on players - state.
 extern player_t players[MAXPLAYERS];
 
-FArchive &operator<< (FArchive &arc, player_t *&p);
-
-void P_CheckPlayerSprite(AActor *mo, int &spritenum, fixed_t &scalex, fixed_t &scaley);
+void P_CheckPlayerSprite(AActor *mo, int &spritenum, DVector2 &scale);
 
 inline void AActor::SetFriendPlayer(player_t *player)
 {
@@ -530,7 +572,7 @@ inline bool AActor::IsNoClip2() const
 	return false;
 }
 
-#define CROUCHSPEED (FRACUNIT/12)
+#define CROUCHSPEED (1./12)
 
 bool P_IsPlayerTotallyFrozen(const player_t *player);
 

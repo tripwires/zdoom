@@ -27,6 +27,8 @@ public:
 
 	void SetCMode(bool cmode);
 	void SetEscape(bool esc);
+	void SetStateMode(bool stately);
+	void DisableStateOptions();
 	const SavedPos SavePos();
 	void RestorePos(const SavedPos &pos);
 
@@ -59,8 +61,8 @@ public:
 	int MustMatchString(const char * const *strings, size_t stride = sizeof(char*));
 	int GetMessageLine();
 
-	void ScriptError(const char *message, ...);
-	void ScriptMessage(const char *message, ...);
+	void ScriptError(const char *message, ...) GCCPRINTF(2,3);
+	void ScriptMessage(const char *message, ...) GCCPRINTF(2,3);
 
 	bool isText();
 
@@ -97,6 +99,8 @@ protected:
 	const char *LastGotPtr;
 	int LastGotLine;
 	bool CMode;
+	BYTE StateMode;
+	bool StateOptions;
 	bool Escape;
 };
 
@@ -120,7 +124,10 @@ enum
 	MSG_WARNING,
 	MSG_FATAL,
 	MSG_ERROR,
-	MSG_DEBUG,
+	MSG_OPTERROR,
+	MSG_DEBUGERROR,
+	MSG_DEBUGWARN,
+	MSG_DEBUGMSG,
 	MSG_LOG,
 	MSG_DEBUGLOG,
 	MSG_MESSAGE
@@ -134,7 +141,9 @@ enum
 
 struct FScriptPosition
 {
+	static int WarnCounter;
 	static int ErrorCounter;
+	static bool StrictErrors;
 	FString FileName;
 	int ScriptLine;
 
@@ -146,9 +155,10 @@ struct FScriptPosition
 	FScriptPosition(FString fname, int line);
 	FScriptPosition(FScanner &sc);
 	FScriptPosition &operator=(const FScriptPosition &other);
-	void Message(int severity, const char *message,...) const;
+	void Message(int severity, const char *message,...) const GCCPRINTF(3,4);
 	static void ResetErrorCounter()
 	{
+		WarnCounter = 0;
 		ErrorCounter = 0;
 	}
 };

@@ -86,6 +86,8 @@
 #include "textures/bitmap.h"
 #include "textures/textures.h"
 
+#include "optwin32.h"
+
 // MACROS ------------------------------------------------------------------
 
 #ifdef _MSC_VER
@@ -468,7 +470,7 @@ static void CALLBACK TimerTicked(UINT id, UINT msg, DWORD_PTR user, DWORD_PTR dw
 //
 //==========================================================================
 
-fixed_t I_GetTimeFrac(uint32 *ms)
+double I_GetTimeFrac(uint32 *ms)
 {
 	DWORD now = timeGetTime();
 	if (ms != NULL)
@@ -478,12 +480,11 @@ fixed_t I_GetTimeFrac(uint32 *ms)
 	DWORD step = TicNext - TicStart;
 	if (step == 0)
 	{
-		return FRACUNIT;
+		return 1.;
 	}
 	else
 	{
-		fixed_t frac = clamp<fixed_t> ((now - TicStart)*FRACUNIT/step, 0, FRACUNIT);
-		return frac;
+		return clamp<double>(double(now - TicStart) / step, 0, 1);
 	}
 }
 
@@ -595,14 +596,14 @@ void I_DetectOS(void)
 
 	if (OSPlatform == os_Win95)
 	{
-		Printf ("OS: Windows %s %lu.%lu.%lu %s\n",
+		if (!batchrun) Printf ("OS: Windows %s %lu.%lu.%lu %s\n",
 				osname,
 				info.dwMajorVersion, info.dwMinorVersion,
 				info.dwBuildNumber & 0xffff, info.szCSDVersion);
 	}
 	else
 	{
-		Printf ("OS: Windows %s (NT %lu.%lu) Build %lu\n    %s\n",
+		if (!batchrun) Printf ("OS: Windows %s (NT %lu.%lu) Build %lu\n    %s\n",
 				osname,
 				info.dwMajorVersion, info.dwMinorVersion,
 				info.dwBuildNumber, info.szCSDVersion);
@@ -610,7 +611,7 @@ void I_DetectOS(void)
 
 	if (OSPlatform == os_unknown)
 	{
-		Printf ("(Assuming Windows 2000)\n");
+		if (!batchrun) Printf ("(Assuming Windows 2000)\n");
 		OSPlatform = os_Win2k;
 	}
 }
@@ -727,7 +728,7 @@ void CalculateCPUSpeed()
 		PerfToMillisec = PerfToSec * 1000.0;
 	}
 
-	Printf ("CPU Speed: %.0f MHz\n", 0.001 / PerfToMillisec);
+	if (!batchrun) Printf ("CPU speed: %.0f MHz\n", 0.001 / PerfToMillisec);
 }
 
 //==========================================================================
@@ -785,7 +786,7 @@ void I_Quit()
 //
 //==========================================================================
 
-void STACK_ARGS I_FatalError(const char *error, ...)
+void I_FatalError(const char *error, ...)
 {
 	static BOOL alreadyThrown = false;
 	gameisdead = true;
@@ -798,6 +799,7 @@ void STACK_ARGS I_FatalError(const char *error, ...)
 		va_start(argptr, error);
 		myvsnprintf(errortext, MAX_ERRORTEXT, error, argptr);
 		va_end(argptr);
+		OutputDebugString(errortext);
 
 		// Record error to log (if logging)
 		if (Logfile)
@@ -825,7 +827,7 @@ void STACK_ARGS I_FatalError(const char *error, ...)
 //
 //==========================================================================
 
-void STACK_ARGS I_Error(const char *error, ...)
+void I_Error(const char *error, ...)
 {
 	va_list argptr;
 	char errortext[MAX_ERRORTEXT];
@@ -833,6 +835,7 @@ void STACK_ARGS I_Error(const char *error, ...)
 	va_start(argptr, error);
 	myvsnprintf(errortext, MAX_ERRORTEXT, error, argptr);
 	va_end(argptr);
+	OutputDebugString(errortext);
 
 	throw CRecoverableError(errortext);
 }
@@ -1051,6 +1054,11 @@ static void DoPrintStr(const char *cp, HWND edit, HANDLE StdOut)
 }
 
 static TArray<FString> bufferedConsoleStuff;
+
+void I_DebugPrint(const char *cp)
+{
+	OutputDebugStringA(cp);
+}
 
 void I_PrintStr(const char *cp)
 {
@@ -1306,7 +1314,7 @@ static HCURSOR CreateCompatibleCursor(FTexture *cursorpic)
 	HDC dc = GetDC(NULL);
 	if (dc == NULL)
 	{
-		return false;
+		return nullptr;
 	}
 	HDC and_mask_dc = CreateCompatibleDC(dc);
 	HDC xor_mask_dc = CreateCompatibleDC(dc);
@@ -1367,10 +1375,16 @@ static HCURSOR CreateAlphaCursor(FTexture *cursorpic)
 	HBITMAP color, mono;
 	void *bits;
 
+	// Find closest integer scale factor for the monitor DPI
+	HDC screenDC = GetDC(0);
+	int dpi = GetDeviceCaps(screenDC, LOGPIXELSX);
+	int scale = MAX((dpi + 96 / 2 - 1) / 96, 1);
+	ReleaseDC(0, screenDC);
+
 	memset(&bi, 0, sizeof(bi));
 	bi.bV5Size = sizeof(bi);
-	bi.bV5Width = 32;
-	bi.bV5Height = 32;
+	bi.bV5Width = 32 * scale;
+	bi.bV5Height = 32 * scale;
 	bi.bV5Planes = 1;
 	bi.bV5BitCount = 32;
 	bi.bV5Compression = BI_BITFIELDS;
@@ -1395,7 +1409,7 @@ static HCURSOR CreateAlphaCursor(FTexture *cursorpic)
 	}
 
 	// Create an empty mask bitmap, since CreateIconIndirect requires this.
-	mono = CreateBitmap(32, 32, 1, 1, NULL);
+	mono = CreateBitmap(32 * scale, 32 * scale, 1, 1, NULL);
 	if (mono == NULL)
 	{
 		DeleteObject(color);
@@ -1405,10 +1419,29 @@ static HCURSOR CreateAlphaCursor(FTexture *cursorpic)
 	// Copy cursor to the color bitmap. Note that GDI bitmaps are upside down compared
 	// to normal conventions, so we create the FBitmap pointing at the last row and use
 	// a negative pitch so that CopyTrueColorPixels will use GDI's orientation.
-	FBitmap bmp((BYTE *)bits + 31*32*4, -32*4, 32, 32);
-	cursorpic->CopyTrueColorPixels(&bmp, 0, 0);
+	if (scale == 1)
+	{
+		FBitmap bmp((BYTE *)bits + 31 * 32 * 4, -32 * 4, 32, 32);
+		cursorpic->CopyTrueColorPixels(&bmp, 0, 0);
+	}
+	else
+	{
+		TArray<uint32_t> unscaled;
+		unscaled.Resize(32 * 32);
+		for (int i = 0; i < 32 * 32; i++) unscaled[i] = 0;
+		FBitmap bmp((BYTE *)&unscaled[0] + 31 * 32 * 4, -32 * 4, 32, 32);
+		cursorpic->CopyTrueColorPixels(&bmp, 0, 0);
+		uint32_t *scaled = (uint32_t*)bits;
+		for (int y = 0; y < 32 * scale; y++)
+		{
+			for (int x = 0; x < 32 * scale; x++)
+			{
+				scaled[x + y * 32 * scale] = unscaled[x / scale + y / scale * 32];
+			}
+		}
+	}
 
-	return CreateBitmapCursor(cursorpic->LeftOffset, cursorpic->TopOffset, mono, color);
+	return CreateBitmapCursor(cursorpic->LeftOffset * scale, cursorpic->TopOffset * scale, mono, color);
 }
 
 //==========================================================================
@@ -1423,11 +1456,11 @@ static HCURSOR CreateBitmapCursor(int xhot, int yhot, HBITMAP and_mask, HBITMAP 
 {
 	ICONINFO iconinfo =
 	{
-		FALSE,		// fIcon
-		xhot,		// xHotspot
-		yhot,		// yHotspot
-		and_mask,	// hbmMask
-		color_mask	// hbmColor
+		FALSE,			// fIcon
+		(DWORD)xhot,	// xHotspot
+		(DWORD)yhot,	// yHotspot
+		and_mask,		// hbmMask
+		color_mask		// hbmColor
 	};
 	HCURSOR cursor = CreateIconIndirect(&iconinfo);
 
@@ -1604,6 +1637,13 @@ TArray<FString> I_GetGogPaths()
 		result.Push(path + "/Plutonia");
 	}
 
+	// Look for Strife: Veteran Edition
+	gamepath = gogregistrypath + "\\1432899949";
+	if (QueryPathKey(HKEY_LOCAL_MACHINE, gamepath.GetChars(), "Path", path))
+	{
+		result.Push(path);	// directly in install folder
+	}
+
 	return result;
 }
 
@@ -1703,20 +1743,19 @@ unsigned int I_MakeRNGSeed()
 
 FString I_GetLongPathName(FString shortpath)
 {
-	static TOptWin32Proc<DWORD (WINAPI*)(LPCTSTR, LPTSTR, DWORD)>
-		GetLongPathNameA("kernel32.dll", "GetLongPathNameA");
+	using OptWin32::GetLongPathNameA;
 
 	// Doesn't exist on NT4
-	if (GetLongPathName == NULL)
+	if (!GetLongPathNameA)
 		return shortpath;
 
-	DWORD buffsize = GetLongPathNameA.Call(shortpath.GetChars(), NULL, 0);
+	DWORD buffsize = GetLongPathNameA(shortpath.GetChars(), NULL, 0);
 	if (buffsize == 0)
 	{ // nothing to change (it doesn't exist, maybe?)
 		return shortpath;
 	}
 	TCHAR *buff = new TCHAR[buffsize];
-	DWORD buffsize2 = GetLongPathNameA.Call(shortpath.GetChars(), buff, buffsize);
+	DWORD buffsize2 = GetLongPathNameA(shortpath.GetChars(), buff, buffsize);
 	if (buffsize2 >= buffsize)
 	{ // Failure! Just return the short path
 		delete[] buff;

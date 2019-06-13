@@ -70,6 +70,27 @@
 
 @end
 
+@interface NSWindow(EnterFullscreenOnZoom)
+- (void)enterFullscreenOnZoom;
+@end
+
+@implementation NSWindow(EnterFullscreenOnZoom)
+
+- (void)enterFullscreen:(id)sender
+{
+	ToggleFullscreen = true;
+}
+
+- (void)enterFullscreenOnZoom
+{
+	NSButton* zoomButton = [self standardWindowButton:NSWindowZoomButton];
+	[zoomButton setEnabled:YES];
+	[zoomButton setAction:@selector(enterFullscreen:)];
+	[zoomButton setTarget:self];
+}
+
+@end
+
 
 EXTERN_CVAR(Bool, ticker   )
 EXTERN_CVAR(Bool, vid_vsync)
@@ -336,6 +357,7 @@ VideoModes[] =
 	{ 1152,  648 },	// 16:9
 	{ 1152,  720 },	// 16:10
 	{ 1152,  864 },
+	{ 1280,  540 }, // 21:9
 	{ 1280,  720 },	// 16:9
 	{ 1280,  854 },
 	{ 1280,  800 },	// 16:10
@@ -358,15 +380,18 @@ VideoModes[] =
 	{ 2048, 1152 }, // 16:9, iMac Retina 4K 21.5", HiDPI off
 	{ 2048, 1536 },
 	{ 2304, 1440 }, // 16:10, MacBook Retina 12"
+	{ 2560, 1080 }, // 21:9
 	{ 2560, 1440 },
 	{ 2560, 1600 },
 	{ 2560, 2048 },
 	{ 2880, 1800 }, // 16:10, MacBook Pro Retina 15"
 	{ 3200, 1800 },
+	{ 3440, 1440 }, // 21:9
 	{ 3840, 2160 },
 	{ 3840, 2400 },
 	{ 4096, 2160 },
 	{ 4096, 2304 }, // 16:9, iMac Retina 4K 21.5"
+	{ 5120, 2160 }, // 21:9
 	{ 5120, 2880 }  // 16:9, iMac Retina 5K 27"
 };
 
@@ -640,7 +665,6 @@ void CocoaVideo::SetFullscreenMode(const int width, const int height)
 	}
 
 	[m_window setFrame:screenFrame display:YES];
-	[m_window setFrameOrigin:NSMakePoint(0.0f, 0.0f)];
 }
 
 void CocoaVideo::SetWindowedMode(const int width, const int height)
@@ -676,6 +700,7 @@ void CocoaVideo::SetWindowedMode(const int width, const int height)
 
 	[m_window setContentSize:windowSize];
 	[m_window center];
+	[m_window enterFullscreenOnZoom];
 	[m_window exitAppOnClose];
 }
 
@@ -1148,7 +1173,7 @@ CCMD(vid_listmodes)
 		return;
 	}
 
-	static const char* const ratios[5] = { "", " - 16:9", " - 16:10", " - 17:10", " - 5:4" };
+	static const char* const ratios[7] = { "", " - 16:9", " - 16:10", " - 17:10", " - 5:4", "", " - 21:9" };
 	int width, height;
 	bool letterbox;
 

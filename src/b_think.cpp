@@ -19,6 +19,10 @@
 #include "statnums.h"
 #include "d_net.h"
 #include "d_event.h"
+#include "d_player.h"
+#include "vectors.h"
+#include "a_ammo.h"
+#include "a_health.h"
 
 static FRandom pr_botmove ("BotMove");
 
@@ -38,20 +42,21 @@ void DBot::Think ()
 		if (teamplay || !deathmatch)
 			mate = Choose_Mate ();
 
-		angle_t oldyaw = player->mo->angle;
-		int oldpitch = player->mo->pitch;
+		AActor *actor = player->mo;
+		DAngle oldyaw = actor->Angles.Yaw;
+		DAngle oldpitch = actor->Angles.Pitch;
 
 		Set_enemy ();
 		ThinkForMove (cmd);
 		TurnToAng ();
 
-		cmd->ucmd.yaw = (short)((player->mo->angle - oldyaw) >> 16) / ticdup;
-		cmd->ucmd.pitch = (short)((oldpitch - player->mo->pitch) >> 16);
+		cmd->ucmd.yaw = (short)((actor->Angles.Yaw - oldyaw).Degrees * (65536 / 360.f)) / ticdup;
+		cmd->ucmd.pitch = (short)((oldpitch - actor->Angles.Pitch).Degrees * (65536 / 360.f));
 		if (cmd->ucmd.pitch == -32768)
 			cmd->ucmd.pitch = -32767;
 		cmd->ucmd.pitch /= ticdup;
-		player->mo->angle = oldyaw + (cmd->ucmd.yaw << 16) * ticdup;
-		player->mo->pitch = oldpitch - (cmd->ucmd.pitch << 16) * ticdup;
+		actor->Angles.Yaw = oldyaw + DAngle(cmd->ucmd.yaw * ticdup * (360 / 65536.f));
+		actor->Angles.Pitch = oldpitch - DAngle(cmd->ucmd.pitch * ticdup * (360 / 65536.f));
 	}
 
 	if (t_active)	t_active--;
@@ -72,38 +77,41 @@ void DBot::Think ()
 	}
 }
 
+#define THINKDISTSQ (50000.*50000./(65536.*65536.))
 //how the bot moves.
 //MAIN movement function.
 void DBot::ThinkForMove (ticcmd_t *cmd)
 {
-	fixed_t dist;
+	double dist;
 	bool stuck;
 	int r;
 
 	stuck = false;
-	dist = dest ? player->mo->AproxDistance(dest) : 0;
+	dist = dest ? player->mo->Distance2D(dest) : 0;
 
 	if (missile &&
-		((!missile->velx || !missile->vely) || !Check_LOS(missile, SHOOTFOV*3/2)))
+		(!missile->Vel.X || !missile->Vel.Y || !Check_LOS(missile, SHOOTFOV*3/2)))
 	{
 		sleft = !sleft;
 		missile = NULL; //Probably ended its travel.
 	}
 
-	if (player->mo->pitch > 0)
-		player->mo->pitch -= 80;
-	else if (player->mo->pitch <= -60)
-		player->mo->pitch += 80;
+#if 0	// this has always been broken and without any reference it cannot be fixed.
+	if (player->mo->Angles.Pitch > 0)
+		player->mo->Angles.Pitch -= 80;
+	else if (player->mo->Angles.Pitch <= -60)
+		player->mo->Angles.Pitch += 80;
+#endif
 
 	//HOW TO MOVE:
-	if (missile && (player->mo->AproxDistance(missile)<AVOID_DIST)) //try avoid missile got from P_Mobj.c thinking part.
+	if (missile && (player->mo->Distance2D(missile)<AVOID_DIST)) //try avoid missile got from P_Mobj.c thinking part.
 	{
 		Pitch (missile);
-		angle = player->mo->AngleTo(missile);
+		Angle = player->mo->AngleTo(missile);
 		cmd->ucmd.sidemove = sleft ? -SIDERUN : SIDERUN;
 		cmd->ucmd.forwardmove = -FORWARDRUN; //Back IS best.
 
-		if ((player->mo->AproxDistance(oldx, oldy)<50000)
+		if ((player->mo->Pos() - old).LengthSquared() < THINKDISTSQ
 			&& t_strafe<=0)
 		{
 			t_strafe = 5;
@@ -156,7 +164,7 @@ void DBot::ThinkForMove (ticcmd_t *cmd)
 			t_fight = AFTERTICS;
 
 		if (t_strafe <= 0 &&
-			(player->mo->AproxDistance(oldx, oldy)<50000
+			((player->mo->Pos() - old).LengthSquared() < THINKDISTSQ
 			|| ((pr_botmove()%30)==10))
 			)
 		{
@@ -165,10 +173,10 @@ void DBot::ThinkForMove (ticcmd_t *cmd)
 			sleft = !sleft;
 		}
 
-		angle = player->mo->AngleTo(enemy);
+		Angle = player->mo->AngleTo(enemy);
 
 		if (player->ReadyWeapon == NULL ||
-			player->mo->AproxDistance(enemy) >
+			player->mo->Distance2D(enemy) >
 			player->ReadyWeapon->MoveCombatDist)
 		{
 			// If a monster, use lower speed (just for cooler apperance while strafing down doomed monster)
@@ -193,7 +201,7 @@ void DBot::ThinkForMove (ticcmd_t *cmd)
 	}
 	else if (mate && !enemy && (!dest || dest==mate)) //Follow mate move.
 	{
-		fixed_t matedist;
+		double matedist;
 
 		Pitch (mate);
 
@@ -206,9 +214,9 @@ void DBot::ThinkForMove (ticcmd_t *cmd)
 			goto roam;
 		}
 
-		angle = player->mo->AngleTo(mate);
+		Angle = player->mo->AngleTo(mate);
 
-		matedist = player->mo->AproxDistance(mate);
+		matedist = player->mo->Distance2D(mate);
 		if (matedist > (FRIEND_DIST*2))
 			cmd->ucmd.forwardmove = FORWARDRUN;
 		else if (matedist > FRIEND_DIST)
@@ -241,7 +249,7 @@ void DBot::ThinkForMove (ticcmd_t *cmd)
 						(pr_botmove()%100)>skill.isp) && player->ReadyWeapon != NULL && !(player->ReadyWeapon->WeaponFlags & WIF_WIMPY_WEAPON))
 						dest = enemy;//Dont let enemy kill the bot by supressive fire. So charge enemy.
 					else //hide while t_fight, but keep view at enemy.
-						angle = player->mo->AngleTo(enemy);
+						Angle = player->mo->AngleTo(enemy);
 				} //Just a monster, so kill it.
 				else
 					dest = enemy;
@@ -253,7 +261,7 @@ void DBot::ThinkForMove (ticcmd_t *cmd)
 				r = pr_botmove();
 				if (r < 128)
 				{
-					TThinkerIterator<AInventory> it (STAT_INVENTORY, bglobal.firstthing);
+					TThinkerIterator<AInventory> it (MAX_STATNUM+1, bglobal.firstthing);
 					AInventory *item = it.Next();
 
 					if (item != NULL || (item = it.Next()) != NULL)
@@ -303,8 +311,7 @@ void DBot::ThinkForMove (ticcmd_t *cmd)
 	if (t_fight<(AFTERTICS/2))
 		player->mo->flags |= MF_DROPOFF;
 
-	oldx = player->mo->X();
-	oldy = player->mo->Y();
+	old = player->mo->Pos();
 }
 
 //BOT_WhatToGet
@@ -328,7 +335,7 @@ void DBot::WhatToGet (AActor *item)
 		// FIXME
 		AWeapon *heldWeapon;
 
-		heldWeapon = static_cast<AWeapon *> (player->mo->FindInventory (item->GetClass()));
+		heldWeapon = dyn_cast<AWeapon>(player->mo->FindInventory(item->GetClass()));
 		if (heldWeapon != NULL)
 		{
 			if (!weapgiveammo)
@@ -343,7 +350,7 @@ void DBot::WhatToGet (AActor *item)
 	else if (item->IsKindOf (RUNTIME_CLASS(AAmmo)))
 	{
 		AAmmo *ammo = static_cast<AAmmo *> (item);
-		const PClass *parent = ammo->GetParentAmmo ();
+		PClassActor *parent = ammo->GetParentAmmo ();
 		AInventory *holdingammo = player->mo->FindInventory (parent);
 
 		if (holdingammo != NULL && holdingammo->Amount >= holdingammo->MaxAmount)
@@ -353,7 +360,7 @@ void DBot::WhatToGet (AActor *item)
 	}
 	else if ((typeis (Megasphere) || typeis (Soulsphere) || typeis (HealthBonus)) && player->mo->health >= deh.MaxSoulsphere)
 		return;
-	else if (item->IsKindOf (RUNTIME_CLASS(AHealth)) && player->mo->health >= deh.MaxHealth /*MAXHEALTH*/)
+	else if (item->IsKindOf (RUNTIME_CLASS(AHealth)) && player->mo->health >= player->mo->GetMaxHealth() + player->mo->stamina)
 		return;
 
 	if ((dest == NULL ||

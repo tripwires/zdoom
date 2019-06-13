@@ -24,11 +24,13 @@
 
 
 #include <math.h>
+#include <float.h>
 #ifdef _MSC_VER
 #include <malloc.h>		// for alloca()
 #endif
 
 #include "templates.h"
+#include "d_player.h"
 #include "m_argv.h"
 #include "m_swap.h"
 #include "m_bbox.h"
@@ -68,6 +70,12 @@
 #include "po_man.h"
 #include "r_renderer.h"
 #include "r_data/colormaps.h"
+#include "p_blockmap.h"
+#include "r_utility.h"
+#include "p_spec.h"
+#ifndef NO_EDATA
+#include "edata.h"
+#endif
 
 #include "fragglescript/t_fs.h"
 
@@ -116,6 +124,7 @@ glsegextra_t*	glsegextras;
 
 int 			numsectors;
 sector_t*		sectors;
+TArray<sector_t>	loadsectors;
 
 int 			numsubsectors;
 subsector_t*	subsectors;
@@ -125,12 +134,13 @@ node_t* 		nodes;
 
 int 			numlines;
 line_t* 		lines;
+TArray<line_t>	loadlines;
 
 int 			numsides;
 side_t* 		sides;
+TArray<side_t>	loadsides;
 
-int				numzones;
-zone_t*			zones;
+TArray<zone_t>	Zones;
 
 node_t * 		gamenodes;
 int 			numgamenodes;
@@ -163,10 +173,8 @@ int 			bmapheight; 	// size in mapblocks
 int				*blockmap;		// int for larger maps ([RH] Made int because BOOM does)
 int				*blockmaplump;	// offsets in blockmap are from here	
 
-fixed_t 		bmaporgx;		// origin of block map
-fixed_t 		bmaporgy;
-int				bmapnegx;		// min negs of block map before wrapping
-int				bmapnegy;
+double	 		bmaporgx;		// origin of block map
+double	 		bmaporgy;
 
 FBlockNode**	blocklinks;		// for thing chains
 
@@ -810,8 +818,7 @@ void P_FloodZones ()
 			P_FloodZone (&sectors[i], z++);
 		}
 	}
-	numzones = z;
-	zones = new zone_t[z];
+	Zones.Resize(z);
 	reverb = S_FindEnvironment(level.DefaultEnvironment);
 	if (reverb == NULL)
 	{
@@ -820,7 +827,7 @@ void P_FloodZones ()
 	}
 	for (i = 0; i < z; ++i)
 	{
-		zones[i].Environment = reverb;
+		Zones[i].Environment = reverb;
 	}
 }
 
@@ -856,8 +863,7 @@ void P_LoadVertexes (MapData * map)
 		SWORD x, y;
 
 		(*map->file) >> x >> y;
-		vertexes[i].x = x << FRACBITS;
-		vertexes[i].y = y << FRACBITS;
+		vertexes[i].set(double(x), double(y));
 	}
 }
 
@@ -995,7 +1001,9 @@ void LoadZNodes(FileReaderBase &data, int glnodes)
 	}
 	for (i = 0; i < newVerts; ++i)
 	{
-		data >> newvertarray[i + orgVerts].x >> newvertarray[i + orgVerts].y;
+		fixed_t x, y;
+		data >> x >> y;
+		newvertarray[i + orgVerts].set(x, y);
 	}
 	if (vertexes != newvertarray)
 	{
@@ -1089,7 +1097,7 @@ void LoadZNodes(FileReaderBase &data, int glnodes)
 			{
 				SWORD coord;
 				data >> coord;
-				nodes[i].bbox[j][k] = coord << FRACBITS;
+				nodes[i].bbox[j][k] = coord;
 			}
 		}
 		for (int m = 0; m < 2; ++m)
@@ -1213,10 +1221,8 @@ void P_LoadSegs (MapData * map)
 	BYTE *vertchanged = new BYTE[numvertexes];	// phares 10/4/98
 	DWORD segangle;
 	line_t* line;		// phares 10/4/98
-	int ptp_angle;		// phares 10/4/98
-	int delta_angle;	// phares 10/4/98
-	int dis;			// phares 10/4/98
-	int dx,dy;			// phares 10/4/98
+	//int ptp_angle;		// phares 10/4/98
+	//int delta_angle;	// phares 10/4/98
 	int vnum1,vnum2;	// phares 10/4/98
 	int lumplen = map->Size(ML_SEGS);
 
@@ -1308,28 +1314,22 @@ void P_LoadSegs (MapData * map)
 			// off, then move one vertex. This may seem insignificant, but one degree
 			// errors _can_ cause firelines.
 
-			ptp_angle = R_PointToAngle2 (li->v1->x, li->v1->y, li->v2->x, li->v2->y);
-			dis = 0;
-			delta_angle = (absangle(ptp_angle-(segangle<<16))>>ANGLETOFINESHIFT)*360/FINEANGLES;
+			DAngle ptp_angle = (li->v2->fPos() - li->v1->fPos()).Angle();
+			DAngle seg_angle = AngleToFloat(segangle << 16);
+			DAngle delta_angle = absangle(ptp_angle, seg_angle);
 
-			if (delta_angle != 0)
+			if (delta_angle >= 1.)
 			{
-				segangle >>= (ANGLETOFINESHIFT-16);
-				dx = (li->v1->x - li->v2->x)>>FRACBITS;
-				dy = (li->v1->y - li->v2->y)>>FRACBITS;
-				dis = ((int) sqrt((double)(dx*dx + dy*dy)))<<FRACBITS;
-				dx = finecosine[segangle];
-				dy = finesine[segangle];
+				double dis = (li->v2->fPos() - li->v1->fPos()).Length();
+				DVector2 delta = seg_angle.ToVector(dis);
 				if ((vnum2 > vnum1) && (vertchanged[vnum2] == 0))
 				{
-					li->v2->x = li->v1->x + FixedMul(dis,dx);
-					li->v2->y = li->v1->y + FixedMul(dis,dy);
+					li->v2->set(li->v1->fPos() + delta);
 					vertchanged[vnum2] = 1; // this was changed
 				}
 				else if (vertchanged[vnum1] == 0)
 				{
-					li->v1->x = li->v2->x - FixedMul(dis,dx);
-					li->v1->y = li->v2->y - FixedMul(dis,dy);
+					li->v1->set(li->v2->fPos() - delta);
 					vertchanged[vnum1] = 1; // this was changed
 				}
 			}
@@ -1497,14 +1497,10 @@ void P_LoadSectors (MapData *map, FMissingTextureTracker &missingtex)
 	{
 		ss->e = &sectors[0].e[i];
 		if (!map->HasBehavior) ss->Flags |= SECF_FLOORDROP;
-		ss->SetPlaneTexZ(sector_t::floor, LittleShort(ms->floorheight)<<FRACBITS);
-		ss->floorplane.d = -ss->GetPlaneTexZ(sector_t::floor);
-		ss->floorplane.c = FRACUNIT;
-		ss->floorplane.ic = FRACUNIT;
-		ss->SetPlaneTexZ(sector_t::ceiling, LittleShort(ms->ceilingheight)<<FRACBITS);
-		ss->ceilingplane.d = ss->GetPlaneTexZ(sector_t::ceiling);
-		ss->ceilingplane.c = -FRACUNIT;
-		ss->ceilingplane.ic = -FRACUNIT;
+		ss->SetPlaneTexZ(sector_t::floor, (double)LittleShort(ms->floorheight));
+		ss->floorplane.set(0, 0, 1., -ss->GetPlaneTexZ(sector_t::floor));
+		ss->SetPlaneTexZ(sector_t::ceiling, (double)LittleShort(ms->ceilingheight));
+		ss->ceilingplane.set(0, 0, -1., ss->GetPlaneTexZ(sector_t::ceiling));
 		SetTexture(ss, i, sector_t::floor, ms->floorpic, missingtex, true);
 		SetTexture(ss, i, sector_t::ceiling, ms->ceilingpic, missingtex, true);
 		ss->lightlevel = LittleShort(ms->lightlevel);
@@ -1513,19 +1509,21 @@ void P_LoadSectors (MapData *map, FMissingTextureTracker &missingtex)
 		else	// [RH] Translate to new sector special
 			ss->special = P_TranslateSectorSpecial (LittleShort(ms->special));
 		tagManager.AddSectorTag(i, LittleShort(ms->tag));
-		ss->thinglist = NULL;
-		ss->touching_thinglist = NULL;		// phares 3/14/98
+		ss->thinglist = nullptr;
+		ss->touching_thinglist = nullptr;		// phares 3/14/98
+		ss->render_thinglist = nullptr;
+		ss->touching_renderthings = nullptr;
 		ss->seqType = defSeqType;
 		ss->SeqName = NAME_None;
 		ss->nextsec = -1;	//jff 2/26/98 add fields to support locking out
 		ss->prevsec = -1;	// stair retriggering until build completes
 
-		ss->SetAlpha(sector_t::floor, FRACUNIT);
-		ss->SetAlpha(sector_t::ceiling, FRACUNIT);
-		ss->SetXScale(sector_t::floor, FRACUNIT);	// [RH] floor and ceiling scaling
-		ss->SetYScale(sector_t::floor, FRACUNIT);
-		ss->SetXScale(sector_t::ceiling, FRACUNIT);
-		ss->SetYScale(sector_t::ceiling, FRACUNIT);
+		ss->SetAlpha(sector_t::floor, 1.);
+		ss->SetAlpha(sector_t::ceiling, 1.);
+		ss->SetXScale(sector_t::floor, 1.);	// [RH] floor and ceiling scaling
+		ss->SetYScale(sector_t::floor, 1.);
+		ss->SetXScale(sector_t::ceiling, 1.);
+		ss->SetYScale(sector_t::ceiling, 1.);
 
 		ss->heightsec = NULL;	// sector used to get floor and ceiling height
 		// killough 3/7/98: end changes
@@ -1644,7 +1642,7 @@ void P_LoadNodes (MapData * map)
 			}
 			for (k = 0; k < 4; k++)
 			{
-				no->bbox[j][k] = LittleShort(mn->bbox[j][k])<<FRACBITS;
+				no->bbox[j][k] = (float)LittleShort(mn->bbox[j][k]);
 			}
 		}
 	}
@@ -1663,8 +1661,8 @@ AActor *SpawnMapThing(int index, FMapThing *mt, int position)
 	AActor *spawned = P_SpawnMapThing(mt, position);
 	if (dumpspawnedthings)
 	{
-		Printf("%5d: (%5d, %5d, %5d), doomednum = %5d, flags = %04x, type = %s\n",
-			index, mt->x>>FRACBITS, mt->y>>FRACBITS, mt->z>>FRACBITS, mt->EdNum, mt->flags, 
+		Printf("%5d: (%5f, %5f, %5f), doomednum = %5d, flags = %04x, type = %s\n",
+			index, mt->pos.X, mt->pos.Y, mt->pos.Z, mt->EdNum, mt->flags, 
 			spawned? spawned->GetClass()->TypeName.GetChars() : "(none)");
 	}
 	T_AddSpawnedThing(spawned);
@@ -1687,21 +1685,18 @@ static void SetMapThingUserData(AActor *actor, unsigned udi)
 	{
 		FName varname = MapThingsUserData[udi].Property;
 		int value = MapThingsUserData[udi].Value;
-		PSymbol *sym = actor->GetClass()->Symbols.FindSymbol(varname, true);
-		PSymbolVariable *var;
+		PField *var = dyn_cast<PField>(actor->GetClass()->Symbols.FindSymbol(varname, true));
 
 		udi++;
 
-		if (sym == NULL || sym->SymbolType != SYM_Variable ||
-			!(var = static_cast<PSymbolVariable *>(sym))->bUserVar ||
-			var->ValueType.Type != VAL_Int)
+		if (var == NULL || (var->Flags & (VARF_Native|VARF_Private|VARF_Protected|VARF_Static)) || !var->Type->IsKindOf(RUNTIME_CLASS(PBasicType)))
 		{
-			DPrintf("%s is not a user variable in class %s\n", varname.GetChars(),
+			DPrintf(DMSG_WARNING, "%s is not a user variable in class %s\n", varname.GetChars(),
 				actor->GetClass()->TypeName.GetChars());
 		}
 		else
 		{ // Set the value of the specified user variable.
-			*(int *)(reinterpret_cast<BYTE *>(actor) + var->offset) = value;
+			var->Type->SetValue(reinterpret_cast<BYTE *>(actor) + var->Offset, value);
 		}
 	}
 }
@@ -1751,42 +1746,53 @@ void P_LoadThings (MapData * map)
 
 		memset (&mti[i], 0, sizeof(mti[i]));
 
-		mti[i].gravity = FRACUNIT;
+		mti[i].Gravity = 1;
 		mti[i].Conversation = 0;
 		mti[i].SkillFilter = MakeSkill(flags);
 		mti[i].ClassFilter = 0xffff;	// Doom map format doesn't have class flags so spawn for all player classes
 		mti[i].RenderStyle = STYLE_Count;
-		mti[i].alpha = -1;
+		mti[i].Alpha = -1;
 		mti[i].health = 1;
 		mti[i].FloatbobPhase = -1;
-		flags &= ~MTF_SKILLMASK;
-		mti[i].flags = (short)((flags & 0xf) | 0x7e0);
-		if (gameinfo.gametype == GAME_Strife)
-		{
-			mti[i].flags &= ~MTF_AMBUSH;
-			if (flags & STF_SHADOW)			mti[i].flags |= MTF_SHADOW;
-			if (flags & STF_ALTSHADOW)		mti[i].flags |= MTF_ALTSHADOW;
-			if (flags & STF_STANDSTILL)		mti[i].flags |= MTF_STANDSTILL;
-			if (flags & STF_AMBUSH)			mti[i].flags |= MTF_AMBUSH;
-			if (flags & STF_FRIENDLY)		mti[i].flags |= MTF_FRIENDLY;
-		}
-		else
-		{
-			if (flags & BTF_BADEDITORCHECK)
-			{
-				flags &= 0x1F;
-			}
-			if (flags & BTF_NOTDEATHMATCH)	mti[i].flags &= ~MTF_DEATHMATCH;
-			if (flags & BTF_NOTCOOPERATIVE)	mti[i].flags &= ~MTF_COOPERATIVE;
-			if (flags & BTF_FRIENDLY)		mti[i].flags |= MTF_FRIENDLY;
-		}
-		if (flags & BTF_NOTSINGLE)			mti[i].flags &= ~MTF_SINGLE;
 
-		mti[i].x = LittleShort(mt->x) << FRACBITS;
-		mti[i].y = LittleShort(mt->y) << FRACBITS;
+		mti[i].pos.X = LittleShort(mt->x);
+		mti[i].pos.Y = LittleShort(mt->y);
 		mti[i].angle = LittleShort(mt->angle);
 		mti[i].EdNum = LittleShort(mt->type);
 		mti[i].info = DoomEdMap.CheckKey(mti[i].EdNum);
+
+
+#ifndef NO_EDATA
+		if (mti[i].info != NULL && mti[i].info->Special == SMT_EDThing)
+		{
+			ProcessEDMapthing(&mti[i], flags);
+		}
+		else
+#endif
+		{
+			flags &= ~MTF_SKILLMASK;
+			mti[i].flags = (short)((flags & 0xf) | 0x7e0);
+			if (gameinfo.gametype == GAME_Strife)
+			{
+				mti[i].flags &= ~MTF_AMBUSH;
+				if (flags & STF_SHADOW)			mti[i].flags |= MTF_SHADOW;
+				if (flags & STF_ALTSHADOW)		mti[i].flags |= MTF_ALTSHADOW;
+				if (flags & STF_STANDSTILL)		mti[i].flags |= MTF_STANDSTILL;
+				if (flags & STF_AMBUSH)			mti[i].flags |= MTF_AMBUSH;
+				if (flags & STF_FRIENDLY)		mti[i].flags |= MTF_FRIENDLY;
+			}
+			else
+			{
+				if (flags & BTF_BADEDITORCHECK)
+				{
+					flags &= 0x1F;
+				}
+				if (flags & BTF_NOTDEATHMATCH)	mti[i].flags &= ~MTF_DEATHMATCH;
+				if (flags & BTF_NOTCOOPERATIVE)	mti[i].flags &= ~MTF_COOPERATIVE;
+				if (flags & BTF_FRIENDLY)		mti[i].flags |= MTF_FRIENDLY;
+			}
+			if (flags & BTF_NOTSINGLE)			mti[i].flags &= ~MTF_SINGLE;
+		}
 	}
 	delete [] mtp;
 }
@@ -1822,9 +1828,9 @@ void P_LoadThings2 (MapData * map)
 		memset (&mti[i], 0, sizeof(mti[i]));
 
 		mti[i].thingid = LittleShort(mth[i].thingid);
-		mti[i].x = LittleShort(mth[i].x)<<FRACBITS;
-		mti[i].y = LittleShort(mth[i].y)<<FRACBITS;
-		mti[i].z = LittleShort(mth[i].z)<<FRACBITS;
+		mti[i].pos.X = LittleShort(mth[i].x);
+		mti[i].pos.Y = LittleShort(mth[i].y);
+		mti[i].pos.Z = LittleShort(mth[i].z);
 		mti[i].angle = LittleShort(mth[i].angle);
 		mti[i].EdNum = LittleShort(mth[i].type);
 		mti[i].info = DoomEdMap.CheckKey(mti[i].EdNum);
@@ -1839,9 +1845,9 @@ void P_LoadThings2 (MapData * map)
 			mti[i].flags &= 0x7ff;	// mask out Strife flags if playing an original Hexen map.
 		}
 
-		mti[i].gravity = FRACUNIT;
+		mti[i].Gravity = 1;
 		mti[i].RenderStyle = STYLE_Count;
-		mti[i].alpha = -1;
+		mti[i].Alpha = -1;
 		mti[i].health = 1;
 		mti[i].FloatbobPhase = -1;
 	}
@@ -1888,29 +1894,28 @@ void P_AdjustLine (line_t *ld)
 	v1 = ld->v1;
 	v2 = ld->v2;
 
-	ld->dx = v2->x - v1->x;
-	ld->dy = v2->y - v1->y;
+	ld->setDelta(v2->fX() - v1->fX(), v2->fY() - v1->fY());
 	
-	if (v1->x < v2->x)
+	if (v1->fX() < v2->fX())
 	{
-		ld->bbox[BOXLEFT] = v1->x;
-		ld->bbox[BOXRIGHT] = v2->x;
+		ld->bbox[BOXLEFT] = v1->fX();
+		ld->bbox[BOXRIGHT] = v2->fX();
 	}
 	else
 	{
-		ld->bbox[BOXLEFT] = v2->x;
-		ld->bbox[BOXRIGHT] = v1->x;
+		ld->bbox[BOXLEFT] = v2->fX();
+		ld->bbox[BOXRIGHT] = v1->fX();
 	}
 
-	if (v1->y < v2->y)
+	if (v1->fY() < v2->fY())
 	{
-		ld->bbox[BOXBOTTOM] = v1->y;
-		ld->bbox[BOXTOP] = v2->y;
+		ld->bbox[BOXBOTTOM] = v1->fY();
+		ld->bbox[BOXTOP] = v2->fY();
 	}
 	else
 	{
-		ld->bbox[BOXBOTTOM] = v2->y;
-		ld->bbox[BOXTOP] = v1->y;
+		ld->bbox[BOXBOTTOM] = v2->fY();
+		ld->bbox[BOXTOP] = v1->fY();
 	}
 }
 
@@ -1956,11 +1961,15 @@ void P_SetLineID (int i, line_t *ld)
 			break;
 			
 		case Plane_Align:
-			setid = ld->args[2];
+			if (!(ib_compatflags & BCOMPATF_NOSLOPEID)) setid = ld->args[2];
 			break;
 			
 		case Static_Init:
 			if (ld->args[1] == Init_SectorLink) setid = ld->args[0];
+			break;
+
+		case Line_SetPortal:
+			setid = ld->args[1]; // 0 = target id, 1 = this id, 2 = plane anchor
 			break;
 		}
 		if (setid != -1)
@@ -1995,8 +2004,8 @@ void P_FinishLoadingLineDef(line_t *ld, int alpha)
 
 	ld->frontsector = ld->sidedef[0] != NULL ? ld->sidedef[0]->sector : NULL;
 	ld->backsector  = ld->sidedef[1] != NULL ? ld->sidedef[1]->sector : NULL;
-	double dx = FIXED2DBL(ld->v2->x - ld->v1->x);
-	double dy = FIXED2DBL(ld->v2->y - ld->v1->y);
+	double dx = (ld->v2->fX() - ld->v1->fX());
+	double dy = (ld->v2->fY() - ld->v1->fY());
 	int linenum = int(ld-lines);
 
 	if (ld->frontsector == NULL)
@@ -2005,7 +2014,7 @@ void P_FinishLoadingLineDef(line_t *ld, int alpha)
 	}
 
 	// [RH] Set some new sidedef properties
-	int len = (int)(sqrt (dx*dx + dy*dy) + 0.5f);
+	int len = (int)(g_sqrt (dx*dx + dy*dy) + 0.5f);
 
 	if (ld->sidedef[0] != NULL)
 	{
@@ -2036,10 +2045,10 @@ void P_FinishLoadingLineDef(line_t *ld, int alpha)
 			additive = true;
 		}
 
-		alpha = Scale(alpha, FRACUNIT, 255); 
+		double dalpha = alpha / 255.;
 		if (!ld->args[0])
 		{
-			ld->Alpha = alpha;
+			ld->alpha = dalpha;
 			if (additive)
 			{
 				ld->flags |= ML_ADDTRANS;
@@ -2051,7 +2060,7 @@ void P_FinishLoadingLineDef(line_t *ld, int alpha)
 			{
 				if (tagManager.LineHasID(j, ld->args[0]))
 				{
-					lines[j].Alpha = alpha;
+					lines[j].alpha = dalpha;
 					if (additive)
 					{
 						lines[j].flags |= ML_ADDTRANS;
@@ -2121,8 +2130,8 @@ void P_LoadLineDefs (MapData * map)
 			I_Error ("Line %d has invalid vertices: %d and/or %d.\nThe map only contains %d vertices.", i+skipped, v1, v2, numvertexes);
 		}
 		else if (v1 == v2 ||
-			(vertexes[LittleShort(mld->v1)].x == vertexes[LittleShort(mld->v2)].x &&
-			 vertexes[LittleShort(mld->v1)].y == vertexes[LittleShort(mld->v2)].y))
+			(vertexes[LittleShort(mld->v1)].fX() == vertexes[LittleShort(mld->v2)].fX() &&
+			 vertexes[LittleShort(mld->v1)].fY() == vertexes[LittleShort(mld->v2)].fY()))
 		{
 			Printf ("Removing 0-length line %d\n", i+skipped);
 			memmove (mld, mld+1, sizeof(*mld)*(numlines-i-1));
@@ -2153,11 +2162,24 @@ void P_LoadLineDefs (MapData * map)
 	ld = lines;
 	for (i = 0; i < numlines; i++, mld++, ld++)
 	{
-		ld->Alpha = FRACUNIT;	// [RH] Opaque by default
+		ld->alpha = 1.;	// [RH] Opaque by default
+		ld->portalindex = UINT_MAX;
 
 		// [RH] Translate old linedef special and flags to be
 		//		compatible with the new format.
-		P_TranslateLineDef (ld, mld, i);
+
+		P_TranslateLineDef (ld, mld, -1);
+		// do not assign the tag for Extradata lines.
+		if (ld->special != Static_Init || (ld->args[1] != Init_EDLine && ld->args[1] != Init_EDSector))
+		{
+			tagManager.AddLineID(i, mld->tag);
+		}
+#ifndef NO_EDATA
+		if (ld->special == Static_Init && ld->args[1] == Init_EDLine)
+		{
+			ProcessEDLinedef(ld, mld->tag);
+		}
+#endif
 
 		ld->v1 = &vertexes[LittleShort(mld->v1)];
 		ld->v2 = &vertexes[LittleShort(mld->v2)];
@@ -2197,8 +2219,8 @@ void P_LoadLineDefs2 (MapData * map)
 		mld = ((maplinedef2_t*)mldf) + i;
 
 		if (mld->v1 == mld->v2 ||
-			(vertexes[LittleShort(mld->v1)].x == vertexes[LittleShort(mld->v2)].x &&
-			 vertexes[LittleShort(mld->v1)].y == vertexes[LittleShort(mld->v2)].y))
+			(vertexes[LittleShort(mld->v1)].fX() == vertexes[LittleShort(mld->v2)].fX() &&
+			 vertexes[LittleShort(mld->v1)].fY() == vertexes[LittleShort(mld->v2)].fY()))
 		{
 			Printf ("Removing 0-length line %d\n", i+skipped);
 			memmove (mld, mld+1, sizeof(*mld)*(numlines-i-1));
@@ -2234,6 +2256,8 @@ void P_LoadLineDefs2 (MapData * map)
 	{
 		int j;
 
+		ld->portalindex = UINT_MAX;
+
 		for (j = 0; j < 5; j++)
 			ld->args[j] = mld->args[j];
 
@@ -2242,7 +2266,7 @@ void P_LoadLineDefs2 (MapData * map)
 
 		ld->v1 = &vertexes[LittleShort(mld->v1)];
 		ld->v2 = &vertexes[LittleShort(mld->v2)];
-		ld->Alpha = FRACUNIT;	// [RH] Opaque by default
+		ld->alpha = 1.;	// [RH] Opaque by default
 
 		P_SetSideNum (&ld->sidedef[0], LittleShort(mld->sidenum[0]));
 		P_SetSideNum (&ld->sidedef[1], LittleShort(mld->sidenum[1]));
@@ -2389,15 +2413,15 @@ static void P_LoopSidedefs (bool firstloop)
 			if (sidetemp[right].b.next != NO_SIDE)
 			{
 				int bestright = right;	// Shut up, GCC
-				angle_t bestang = ANGLE_MAX;
+				DAngle bestang = 360.;
 				line_t *leftline, *rightline;
-				angle_t ang1, ang2, ang;
+				DAngle ang1, ang2, ang;
 
 				leftline = sides[i].linedef;
-				ang1 = R_PointToAngle2 (0, 0, leftline->dx, leftline->dy);
+				ang1 = leftline->Delta().Angle();
 				if (!sidetemp[i].b.lineside)
 				{
-					ang1 += ANGLE_180;
+					ang1 += 180;
 				}
 
 				while (right != NO_SIDE)
@@ -2407,13 +2431,13 @@ static void P_LoopSidedefs (bool firstloop)
 						rightline = sides[right].linedef;
 						if (rightline->frontsector != rightline->backsector)
 						{
-							ang2 = R_PointToAngle2 (0, 0, rightline->dx, rightline->dy);
+							ang2 = rightline->Delta().Angle();
 							if (sidetemp[right].b.lineside)
 							{
-								ang2 += ANGLE_180;
+								ang2 += 180;
 							}
 
-							ang = ang2 - ang1;
+							ang = (ang2 - ang1).Normalized360();
 
 							if (ang != 0 && ang <= bestang)
 							{
@@ -2455,7 +2479,7 @@ int P_DetermineTranslucency (int lumpnum)
 	if (newcolor2.r == 255)	// if black on white results in white it's either
 							// fully transparent or additive
 	{
-		if (developer)
+		if (developer >= DMSG_NOTIFY)
 		{
 			char lumpname[9];
 			lumpname[8] = 0;
@@ -2466,7 +2490,7 @@ int P_DetermineTranslucency (int lumpnum)
 		return -newcolor.r;
 	}
 
-	if (developer)
+	if (developer >= DMSG_NOTIFY)
 	{
 		char lumpname[9];
 		lumpname[8] = 0;
@@ -2605,10 +2629,10 @@ void P_LoadSideDefs2 (MapData *map, FMissingTextureTracker &missingtex)
 			msd->rowoffset += 102;
 		}
 
-		sd->SetTextureXOffset(LittleShort(msd->textureoffset)<<FRACBITS);
-		sd->SetTextureYOffset(LittleShort(msd->rowoffset)<<FRACBITS);
-		sd->SetTextureXScale(FRACUNIT);
-		sd->SetTextureYScale(FRACUNIT);
+		sd->SetTextureXOffset(LittleShort(msd->textureoffset));
+		sd->SetTextureYOffset(LittleShort(msd->rowoffset));
+		sd->SetTextureXScale(1.);
+		sd->SetTextureYScale(1.);
 		sd->linedef = NULL;
 		sd->Flags = 0;
 		sd->Index = i;
@@ -2751,6 +2775,7 @@ static void P_CreateBlockMap ()
 	TArray<int> *BlockLists, *block, *endblock;
 	int adder;
 	int bmapwidth, bmapheight;
+	double dminx, dmaxx, dminy, dmaxy;
 	int minx, maxx, miny, maxy;
 	int i;
 	int line;
@@ -2759,21 +2784,21 @@ static void P_CreateBlockMap ()
 		return;
 
 	// Find map extents for the blockmap
-	minx = maxx = vertexes[0].x;
-	miny = maxy = vertexes[0].y;
+	dminx = dmaxx = vertexes[0].fX();
+	dminy = dmaxy = vertexes[0].fY();
 
 	for (i = 1; i < numvertexes; ++i)
 	{
-			 if (vertexes[i].x < minx) minx = vertexes[i].x;
-		else if (vertexes[i].x > maxx) maxx = vertexes[i].x;
-			 if (vertexes[i].y < miny) miny = vertexes[i].y;
-		else if (vertexes[i].y > maxy) maxy = vertexes[i].y;
+			 if (vertexes[i].fX() < dminx) dminx = vertexes[i].fX();
+		else if (vertexes[i].fX() > dmaxx) dmaxx = vertexes[i].fX();
+			 if (vertexes[i].fY() < dminy) dminy = vertexes[i].fY();
+		else if (vertexes[i].fY() > dmaxy) dmaxy = vertexes[i].fY();
 	}
 
-	maxx >>= FRACBITS;
-	minx >>= FRACBITS;
-	maxy >>= FRACBITS;
-	miny >>= FRACBITS;
+	minx = int(dminx);
+	miny = int(dminy);
+	maxx = int(dmaxx);
+	maxy = int(dmaxy);
 
 	bmapwidth =	 ((maxx - minx) >> BLOCKBITS) + 1;
 	bmapheight = ((maxy - miny) >> BLOCKBITS) + 1;
@@ -2789,10 +2814,10 @@ static void P_CreateBlockMap ()
 
 	for (line = 0; line < numlines; ++line)
 	{
-		int x1 = lines[line].v1->x >> FRACBITS;
-		int y1 = lines[line].v1->y >> FRACBITS;
-		int x2 = lines[line].v2->x >> FRACBITS;
-		int y2 = lines[line].v2->y >> FRACBITS;
+		int x1 = int(lines[line].v1->fX());
+		int y1 = int(lines[line].v1->fY());
+		int x2 = int(lines[line].v2->fX());
+		int y2 = int(lines[line].v2->fY());
 		int dx = x2 - x1;
 		int dy = y2 - y1;
 		int bx = (x1 - minx) >> BLOCKBITS;
@@ -3005,7 +3030,7 @@ void P_LoadBlockMap (MapData * map)
 		Args->CheckParm("-blockmap")
 		)
 	{
-		DPrintf ("Generating BLOCKMAP\n");
+		DPrintf (DMSG_SPAMMY, "Generating BLOCKMAP\n");
 		P_CreateBlockMap ();
 	}
 	else
@@ -3037,21 +3062,16 @@ void P_LoadBlockMap (MapData * map)
 
 		if (!P_VerifyBlockMap(count))
 		{
-			DPrintf ("Generating BLOCKMAP\n");
+			DPrintf (DMSG_SPAMMY, "Generating BLOCKMAP\n");
 			P_CreateBlockMap();
 		}
 
 	}
 
-	bmaporgx = blockmaplump[0] << FRACBITS;
-	bmaporgy = blockmaplump[1] << FRACBITS;
+	bmaporgx = blockmaplump[0];
+	bmaporgy = blockmaplump[1];
 	bmapwidth = blockmaplump[2];
 	bmapheight = blockmaplump[3];
-	// MAES: set blockmapxneg and blockmapyneg
-	// E.g. for a full 512x512 map, they should be both
-	// -1. For a 257*257, they should be both -255 etc.
-	bmapnegx = bmapwidth > 255 ? bmapwidth - 512 : -257;
-	bmapnegy = bmapheight > 255 ? bmapheight - 512 : -257;
 
 	// clear out mobj chains
 	count = bmapwidth*bmapheight;
@@ -3174,51 +3194,32 @@ static void P_GroupLines (bool buildmap)
 	{
 		if (linesDoneInEachSector[i] != sector->linecount)
 		{
-			I_Error ("P_GroupLines: miscounted");
+			I_Error("P_GroupLines: miscounted");
 		}
-		if (sector->linecount != 0)
+		if (sector->linecount > 3)
 		{
-			bbox.ClearBox ();
+			bbox.ClearBox();
 			for (j = 0; j < sector->linecount; ++j)
 			{
 				li = sector->lines[j];
-				bbox.AddToBox (li->v1->x, li->v1->y);
-				bbox.AddToBox (li->v2->x, li->v2->y);
+				bbox.AddToBox(li->v1->fPos());
+				bbox.AddToBox(li->v2->fPos());
 			}
+
+			// set the center to the middle of the bounding box
+			sector->centerspot.X = (bbox.Right() + bbox.Left()) / 2;
+			sector->centerspot.Y = (bbox.Top() + bbox.Bottom()) / 2;
 		}
-
-		// set the soundorg to the middle of the bounding box
-		sector->soundorg[0] = bbox.Right()/2 + bbox.Left()/2;
-		sector->soundorg[1] = bbox.Top()/2 + bbox.Bottom()/2;
-
-		// For triangular sectors the above does not calculate good points unless the longest of the triangle's lines is perfectly horizontal and vertical
-		if (sector->linecount == 3)
+		else if (sector->linecount > 0)
 		{
-			vertex_t *Triangle[2];
-			Triangle[0] = sector->lines[0]->v1;
-			Triangle[1] = sector->lines[0]->v2;
-			if (sector->linecount > 1)
+			// For triangular sectors the above does not calculate good points unless the longest of the triangle's lines is perfectly horizontal and vertical
+			DVector2 pos = { 0,0 };
+			for (int i = 0; i < sector->linecount; i++)
 			{
-				fixed_t dx = Triangle[1]->x - Triangle[0]->x;
-				fixed_t dy = Triangle[1]->y - Triangle[0]->y;
-				// Find another point in the sector that does not lie
-				// on the same line as the first two points.
-				for (j = 0; j < 2; ++j)
-				{
-					vertex_t *v;
-
-					v = (j == 1) ? sector->lines[1]->v1 : sector->lines[1]->v2;
-					if (DMulScale32 (v->y - Triangle[0]->y, dx,
-									Triangle[0]->x - v->x, dy) != 0)
-					{
-						sector->soundorg[0] = Triangle[0]->x / 3 + Triangle[1]->x / 3 + v->x / 3;
-						sector->soundorg[1] = Triangle[0]->y / 3 + Triangle[1]->y / 3 + v->y / 3;
-						break;
-					}
-				}
+				pos += sector->lines[i]->v1->fPos() + sector->lines[i]->v2->fPos();
 			}
+			sector->centerspot = pos / (2 * sector->linecount);
 		}
-
 	}
 	delete[] linesDoneInEachSector;
 	times[3].Unclock();
@@ -3312,20 +3313,23 @@ void P_LoadReject (MapData * map, bool junk)
 //
 // [RH] P_LoadBehavior
 //
-void P_LoadBehavior (MapData * map)
+void P_LoadBehavior(MapData * map)
 {
-	map->Seek(ML_BEHAVIOR);
-	FBehavior::StaticLoadModule (-1, map->file, map->Size(ML_BEHAVIOR));
-	if (!FBehavior::StaticCheckAllGood ())
+	if (map->Size(ML_BEHAVIOR) > 0)
 	{
-		Printf ("ACS scripts unloaded.\n");
-		FBehavior::StaticUnloadModules ();
+		map->Seek(ML_BEHAVIOR);
+		FBehavior::StaticLoadModule(-1, map->file, map->Size(ML_BEHAVIOR));
+	}
+	if (!FBehavior::StaticCheckAllGood())
+	{
+		Printf("ACS scripts unloaded.\n");
+		FBehavior::StaticUnloadModules();
 	}
 }
 
 void P_GetPolySpots (MapData * map, TArray<FNodeBuilder::FPolyStart> &spots, TArray<FNodeBuilder::FPolyStart> &anchors)
 {
-	if (map->HasBehavior)
+	//if (map->HasBehavior)
 	{
 		for (unsigned int i = 0; i < MapThingsConverted.Size(); ++i)
 		{
@@ -3333,8 +3337,8 @@ void P_GetPolySpots (MapData * map, TArray<FNodeBuilder::FPolyStart> &spots, TAr
 			if (mentry != NULL && mentry->Type == NULL && mentry->Special >= SMT_PolyAnchor && mentry->Special <= SMT_PolySpawnHurt)
 			{
 				FNodeBuilder::FPolyStart newvert;
-				newvert.x = MapThingsConverted[i].x;
-				newvert.y = MapThingsConverted[i].y;
+				newvert.x = FLOAT2FIXED(MapThingsConverted[i].pos.X);
+				newvert.y = FLOAT2FIXED(MapThingsConverted[i].pos.Y);
 				newvert.polynum = MapThingsConverted[i].angle;
 				if (mentry->Special == SMT_PolyAnchor)
 				{
@@ -3349,14 +3353,93 @@ void P_GetPolySpots (MapData * map, TArray<FNodeBuilder::FPolyStart> &spots, TAr
 	}
 }
 
+
+//===========================================================================
+//
+// P_PrecacheLevel
+//
+// Preloads all relevant graphics for the level.
+//
+//===========================================================================
+
+static void P_PrecacheLevel()
+{
+	int i;
+	BYTE *hitlist;
+	TMap<PClassActor *, bool> actorhitlist;
+	int cnt = TexMan.NumTextures();
+
+	if (demoplayback)
+		return;
+
+	hitlist = new BYTE[cnt];
+	memset(hitlist, 0, cnt);
+
+	AActor *actor;
+	TThinkerIterator<AActor> iterator;
+
+	while ((actor = iterator.Next()))
+	{
+		actorhitlist[actor->GetClass()] = true;
+	}
+
+	for (unsigned i = 0; i < level.info->PrecacheClasses.Size(); i++)
+	{
+		// level.info can only store names, no class pointers.
+		PClassActor *cls = PClass::FindActor(level.info->PrecacheClasses[i]);
+		if (cls != NULL) actorhitlist[cls] = true;
+	}
+
+	for (i = numsectors - 1; i >= 0; i--)
+	{
+		hitlist[sectors[i].GetTexture(sector_t::floor).GetIndex()] |= FTextureManager::HIT_Flat;
+		hitlist[sectors[i].GetTexture(sector_t::ceiling).GetIndex()] |= FTextureManager::HIT_Flat;
+	}
+
+	for (i = numsides - 1; i >= 0; i--)
+	{
+		hitlist[sides[i].GetTexture(side_t::top).GetIndex()] |= FTextureManager::HIT_Wall;
+		hitlist[sides[i].GetTexture(side_t::mid).GetIndex()] |= FTextureManager::HIT_Wall;
+		hitlist[sides[i].GetTexture(side_t::bottom).GetIndex()] |= FTextureManager::HIT_Wall;
+	}
+
+	// Sky texture is always present.
+	// Note that F_SKY1 is the name used to
+	//	indicate a sky floor/ceiling as a flat,
+	//	while the sky texture is stored like
+	//	a wall texture, with an episode dependant
+	//	name.
+
+	if (sky1texture.isValid())
+	{
+		hitlist[sky1texture.GetIndex()] |= FTextureManager::HIT_Sky;
+	}
+	if (sky2texture.isValid())
+	{
+		hitlist[sky2texture.GetIndex()] |= FTextureManager::HIT_Sky;
+	}
+
+	for (unsigned i = 0; i < level.info->PrecacheTextures.Size(); i++)
+	{
+		FTextureID tex = TexMan.CheckForTexture(level.info->PrecacheTextures[i], FTexture::TEX_Wall, FTextureManager::TEXMAN_Overridable | FTextureManager::TEXMAN_TryAny | FTextureManager::TEXMAN_ReturnFirst);
+		if (tex.Exists()) hitlist[tex.GetIndex()] |= FTextureManager::HIT_Wall;
+	}
+
+	Renderer->Precache(hitlist, actorhitlist);
+
+	delete[] hitlist;
+}
+
 extern polyblock_t **PolyBlockMap;
 
 void P_FreeLevelData ()
 {
+	interpolator.ClearInterpolations();	// [RH] Nothing to interpolate on a fresh level.
 	Renderer->CleanLevelData();
 	FPolyObj::ClearAllSubsectorLinks(); // can't be done as part of the polyobj deletion process.
 	SN_StopAllSequences ();
 	DThinker::DestroyAllThinkers ();
+	P_ClearPortals();
 	tagManager.Clear();
 	level.total_monsters = level.total_items = level.total_secrets =
 		level.killed_monsters = level.found_items = level.found_secrets =
@@ -3468,18 +3551,9 @@ void P_FreeLevelData ()
 		polyobjs = NULL;
 	}
 	po_NumPolyobjs = 0;
-	if (zones != NULL)
-	{
-		delete[] zones;
-		zones = NULL;
-	}
-	numzones = 0;
+	Zones.Clear();
 	P_FreeStrifeConversations ();
-	if (level.Scrolls != NULL)
-	{
-		delete[] level.Scrolls;
-		level.Scrolls = NULL;
-	}
+	level.Scrolls.Clear();
 	P_ClearUDMFKeys();
 }
 
@@ -3572,7 +3646,7 @@ void P_SetupLevel (const char *lumpname, int position)
 	translationtables[TRANSLATION_LevelScripted].Clear();
 
 	// Initial height of PointOfView will be set by player think.
-	players[consoleplayer].viewz = 1; 
+	players[consoleplayer].viewz = NO_VALUE; 
 
 	// Make sure all sounds are stopped before Z_FreeTags.
 	S_Start ();
@@ -3584,7 +3658,6 @@ void P_SetupLevel (const char *lumpname, int position)
 
 	// Free all level data from the previous map
 	P_FreeLevelData ();
-	interpolator.ClearInterpolations();	// [RH] Nothing to interpolate on a fresh level.
 
 	MapData *map = P_OpenMapData(lumpname, true);
 	if (map == NULL)
@@ -3592,6 +3665,8 @@ void P_SetupLevel (const char *lumpname, int position)
 		I_Error("Unable to open map '%s'\n", lumpname);
 	}
 
+	// generate a checksum for the level, to be included and checked with savegames.
+	map->GetChecksum(level.md5);
 	// find map num
 	level.lumpnum = map->lumpnum;
 	hasglnodes = false;
@@ -3676,6 +3751,10 @@ void P_SetupLevel (const char *lumpname, int position)
 		}
 
 		FBehavior::StaticLoadDefaultModules ();
+#ifndef NO_EDATA
+		LoadMapinfoACSLump();
+#endif
+
 
 		P_LoadStrifeConversations (map, lumpname);
 
@@ -3873,7 +3952,7 @@ void P_SetupLevel (const char *lumpname, int position)
 			subsectors, numsubsectors,
 			vertexes, numvertexes);
 		endTime = I_FPSTime ();
-		DPrintf ("BSP generation took %.3f sec (%d segs)\n", (endTime - startTime) * 0.001, numsegs);
+		DPrintf (DMSG_NOTIFY, "BSP generation took %.3f sec (%d segs)\n", (endTime - startTime) * 0.001, numsegs);
 		oldvertextable = builder.GetOldVertexTable();
 		reloop = true;
 	}
@@ -3886,8 +3965,8 @@ void P_SetupLevel (const char *lumpname, int position)
 			seg_t * seg=&segs[i];
 			if (seg->backsector == seg->frontsector && seg->linedef)
 			{
-				fixed_t d1=P_AproxDistance(seg->v1->x-seg->linedef->v1->x,seg->v1->y-seg->linedef->v1->y);
-				fixed_t d2=P_AproxDistance(seg->v2->x-seg->linedef->v1->x,seg->v2->y-seg->linedef->v1->y);
+				double d1 = (seg->v1->fPos() - seg->linedef->v1->fPos()).LengthSquared();
+				double d2 = (seg->v2->fPos() - seg->linedef->v1->fPos()).LengthSquared();
 
 				if (d2<d1)	// backside
 				{
@@ -4006,7 +4085,8 @@ void P_SetupLevel (const char *lumpname, int position)
 
 	times[16].Clock();
 	if (reloop) P_LoopSidedefs (false);
-	PO_Init ();	// Initialize the polyobjs
+	PO_Init ();				// Initialize the polyobjs
+	P_FinalizePortals();	// finalize line portals after polyobjects have been initialized. This info is needed for properly flagging them.
 	times[16].Unclock();
 
 	assert(sidetemp != NULL);
@@ -4071,7 +4151,7 @@ void P_SetupLevel (const char *lumpname, int position)
 	// preload graphics and sounds
 	if (precache)
 	{
-		TexMan.PrecacheLevel ();
+		P_PrecacheLevel ();
 		S_PrecacheLevel ();
 	}
 	times[17].Unclock();
@@ -4117,6 +4197,13 @@ void P_SetupLevel (const char *lumpname, int position)
 	MapThingsUserDataIndex.Clear();
 	MapThingsUserData.Clear();
 
+	loadsectors.Resize(numsectors);
+	memcpy(&loadsectors[0], sectors, numsectors * sizeof(sector_t));
+	loadlines.Resize(numlines);
+	memcpy(&loadlines[0], lines, numlines * sizeof(line_t));
+	loadsides.Resize(numsides);
+	memcpy(&loadsides[0], sides, numsides * sizeof(side_t));
+
 	if (glsegextras != NULL)
 	{
 		delete[] glsegextras;
@@ -4161,9 +4248,9 @@ CCMD (lineloc)
 	{
 		Printf ("No such line\n");
 	}
-	Printf ("(%d,%d) -> (%d,%d)\n", lines[linenum].v1->x >> FRACBITS,
-		lines[linenum].v1->y >> FRACBITS,
-		lines[linenum].v2->x >> FRACBITS,
-		lines[linenum].v2->y >> FRACBITS);
+	Printf ("(%f,%f) -> (%f,%f)\n", lines[linenum].v1->fX(),
+		lines[linenum].v1->fY(),
+		lines[linenum].v2->fX(),
+		lines[linenum].v2->fY());
 }
 #endif

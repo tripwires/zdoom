@@ -78,7 +78,7 @@ FButtonStatus	MenuButtons[NUM_MKEYS];
 int				MenuButtonTickers[NUM_MKEYS];
 bool			MenuButtonOrigin[NUM_MKEYS];
 int				BackbuttonTime;
-fixed_t			BackbuttonAlpha;
+float			BackbuttonAlpha;
 static bool		MenuEnabled = true;
 
 
@@ -91,9 +91,11 @@ static bool		MenuEnabled = true;
 //
 //============================================================================
 
-IMPLEMENT_POINTY_CLASS (DMenu)
-	DECLARE_POINTER(mParentMenu)
-END_POINTERS
+IMPLEMENT_CLASS(DMenu, false, true)
+
+IMPLEMENT_POINTERS_START(DMenu)
+	IMPLEMENT_POINTER(mParentMenu)
+IMPLEMENT_POINTERS_END
 
 DMenu::DMenu(DMenu *parent) 
 {
@@ -274,7 +276,7 @@ void DMenu::Drawer ()
 		}
 		else
 		{
-			screen->DrawTexture(tex, x, y, DTA_CleanNoMove, true, DTA_Alpha, BackbuttonAlpha, TAG_DONE);
+			screen->DrawTexture(tex, x, y, DTA_CleanNoMove, true, DTA_AlphaF, BackbuttonAlpha, TAG_DONE);
 		}
 	}
 }
@@ -352,7 +354,7 @@ void M_SetMenu(FName menu, int param)
 		GameStartupInfo.Episode = -1;
 		GameStartupInfo.PlayerClass = 
 			param == -1000? NULL :
-			param == -1? "Random" : GetPrintableDisplayName(PlayerClasses[param].Type);
+			param == -1? "Random" : GetPrintableDisplayName(PlayerClasses[param].Type).GetChars();
 		break;
 
 	case NAME_Skillmenu:
@@ -458,6 +460,7 @@ void M_SetMenu(FName menu, int param)
 		}
 	}
 	Printf("Attempting to open menu of unknown type '%s'\n", menu.GetChars());
+	M_ClearMenus();
 }
 
 //=============================================================================
@@ -680,12 +683,13 @@ void M_Ticker (void)
 		}
 		if (BackbuttonTime > 0)
 		{
-			if (BackbuttonAlpha < FRACUNIT) BackbuttonAlpha += FRACUNIT/10;
+			if (BackbuttonAlpha < 1.f) BackbuttonAlpha += .1f;
+			if (BackbuttonAlpha > 1.f) BackbuttonAlpha = 1.f;
 			BackbuttonTime--;
 		}
 		else
 		{
-			if (BackbuttonAlpha > 0) BackbuttonAlpha -= FRACUNIT/10;
+			if (BackbuttonAlpha > 0) BackbuttonAlpha -= .1f;
 			if (BackbuttonAlpha < 0) BackbuttonAlpha = 0;
 		}
 	}
@@ -715,7 +719,11 @@ void M_Drawer (void)
 
 	if (DMenu::CurrentMenu != NULL && menuactive != MENU_Off) 
 	{
-		if (DMenu::CurrentMenu->DimAllowed()) screen->Dim(fade);
+		if (DMenu::CurrentMenu->DimAllowed())
+		{
+			screen->Dim(fade);
+			V_SetBorderNeedRefresh();
+		}
 		DMenu::CurrentMenu->Drawer();
 	}
 }

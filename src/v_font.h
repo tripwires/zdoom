@@ -39,7 +39,6 @@
 class DCanvas;
 struct FRemapTable;
 class FTexture;
-class FArchive;
 
 enum EColorRange
 {
@@ -88,6 +87,7 @@ public:
 	int GetDefaultKerning () const { return GlobalKerning; }
 	virtual void LoadTranslations();
 	void Preload() const;
+	const char *GetName() const { return Name; }
 
 	static FFont *FindFont (const char *fontname);
 	static void StaticPreloadFonts();
@@ -95,6 +95,7 @@ public:
 	// Return width of string in pixels (unscaled)
 	int StringWidth (const BYTE *str) const;
 	inline int StringWidth (const char *str) const { return StringWidth ((const BYTE *)str); }
+	inline int StringWidth (const FString &str) const { return StringWidth ((const BYTE *)str.GetChars()); }
 
 	int GetCharCode(int code, bool needpic) const;
 	char GetCursor() const { return Cursor; }
@@ -133,8 +134,6 @@ protected:
 
 	friend void V_ClearFonts();
 	friend void V_RetranslateFonts();
-
-	friend FArchive &SerializeFFontPtr (FArchive &arc, FFont* &font);
 };
 
 

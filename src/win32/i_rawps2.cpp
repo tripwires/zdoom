@@ -158,7 +158,7 @@ protected:
 
 	void DoRegister();
 	FRawPS2Controller *EnumDevices();
-	static int STACK_ARGS DeviceSort(const void *a, const void *b);
+	static int DeviceSort(const void *a, const void *b);
 };
 
 // Each entry is an offset to the corresponding data field in the
@@ -389,7 +389,7 @@ bool FRawPS2Controller::ProcessInput(RAWHID *raw, int code)
 {
 	// w32api has an incompatible definition of bRawData.
 	// (But the version that comes with MinGW64 is fine.)
-#if defined(__GNUC__) && !defined(_WIN64)
+#if defined(__GNUC__) && !defined(__MINGW64_VERSION_MAJOR)
 	BYTE *rawdata = &raw->bRawData;
 #else
 	BYTE *rawdata = raw->bRawData;
@@ -1292,6 +1292,10 @@ void I_StartupRawPS2()
 			if (joys->GetDevice())
 			{
 				JoyDevices[INPUT_RawPS2] = joys;
+			}
+			else
+			{
+				delete joys;
 			}
 		}
 	}

@@ -16,7 +16,7 @@
 #include <stdarg.h>
 
 // the dec offsetof macro doesnt work very well...
-#define myoffsetof(type,identifier) ((size_t)&((type *)1)->identifier - 1)
+#define myoffsetof(type,identifier) ((size_t)&((type *)alignof(type))->identifier - alignof(type))
 
 int		Q_filelength (FILE *f);
 bool FileExists (const char *filename);
@@ -33,8 +33,8 @@ void 	DefaultExtension (FString &path, const char *extension);
 FString	ExtractFilePath (const char *path);
 FString	ExtractFileBase (const char *path, bool keep_extension=false);
 
-int		ParseHex (const char *str);
-int 	ParseNum (const char *str);
+struct FScriptPosition;
+int		ParseHex(const char *str, FScriptPosition *sc = nullptr);
 bool	IsNum (const char *str);		// [RH] added
 
 char	*copystring(const char *s);

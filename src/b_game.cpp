@@ -59,6 +59,8 @@ Everything that is changed is marked (maybe commented) with "Added by MC"
 #include "i_system.h"
 #include "d_net.h"
 #include "d_netinf.h"
+#include "d_player.h"
+#include "doomerrors.h"
 
 static FRandom pr_botspawn ("BotSpawn");
 
@@ -116,23 +118,24 @@ void FCajunMaster::Main ()
 	}
 
 	//Check if player should go observer. Or un observe
+	FLinkContext ctx;
 	if (bot_observer && !observer && !netgame)
 	{
 		Printf ("%s is now observer\n", players[consoleplayer].userinfo.GetName());
 		observer = true;
-		players[consoleplayer].mo->UnlinkFromWorld ();
+		players[consoleplayer].mo->UnlinkFromWorld (&ctx);
 		players[consoleplayer].mo->flags = MF_DROPOFF|MF_NOBLOCKMAP|MF_NOCLIP|MF_NOTDMATCH|MF_NOGRAVITY|MF_FRIENDLY;
 		players[consoleplayer].mo->flags2 |= MF2_FLY;
-		players[consoleplayer].mo->LinkToWorld ();
+		players[consoleplayer].mo->LinkToWorld (&ctx);
 	}
 	else if (!bot_observer && observer && !netgame) //Go back
 	{
 		Printf ("%s returned to the fray\n", players[consoleplayer].userinfo.GetName());
 		observer = false;
-		players[consoleplayer].mo->UnlinkFromWorld ();
+		players[consoleplayer].mo->UnlinkFromWorld (&ctx);
 		players[consoleplayer].mo->flags = MF_SOLID|MF_SHOOTABLE|MF_DROPOFF|MF_PICKUP|MF_NOTDMATCH|MF_FRIENDLY;
 		players[consoleplayer].mo->flags2 &= ~MF2_FLY;
-		players[consoleplayer].mo->LinkToWorld ();
+		players[consoleplayer].mo->LinkToWorld (&ctx);
 	}
 }
 
@@ -369,14 +372,6 @@ bool FCajunMaster::DoAddBot (BYTE *info, botskill_t skill)
 
 	D_ReadUserInfoStrings (bnum, &info, false);
 
-	if (!deathmatch && playerstarts[bnum].type == 0)
-	{
-		Printf ("%s tried to join, but there was no player %d start\n",
-			players[bnum].userinfo.GetName(), bnum+1);
-		ClearPlayer (bnum, false);	// Make the bot inactive again
-		return false;
-	}
-
 	multiplayer = true; //Prevents cheating and so on; emulates real netgame (almost).
 	players[bnum].Bot = new DBot;
 	players[bnum].Bot->player = &players[bnum];
@@ -500,10 +495,18 @@ bool FCajunMaster::LoadBots ()
 	tmp = M_GetCajunPath(BOTFILENAME);
 	if (tmp.IsEmpty())
 	{
-		DPrintf ("No " BOTFILENAME ", so no bots\n");
+		DPrintf (DMSG_ERROR, "No " BOTFILENAME ", so no bots\n");
 		return false;
 	}
-	sc.OpenFile(tmp);
+	try
+	{
+		sc.OpenFile(tmp);
+	}
+	catch (CRecoverableError &err)
+	{
+		Printf("%s. So no bots\n", err.GetMessage());
+		return false;
+	}
 
 	while (sc.GetString ())
 	{

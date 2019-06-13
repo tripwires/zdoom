@@ -157,8 +157,9 @@ private:
 		IOHIDElementCookie cookie;
 		int32_t            value;
 
-		DigitalButton(const IOHIDElementCookie cookie)
+		explicit DigitalButton(const IOHIDElementCookie cookie)
 		: cookie(cookie)
+		, value(0)
 		{ }
 	};
 
@@ -1017,7 +1018,7 @@ IOKitJoystickManager::~IOKitJoystickManager()
 		if (0 != notification)
 		{
 			IOObjectRelease(notification);
-			notification = NULL;
+			notification = 0;
 		}
 	}
 }

@@ -48,17 +48,27 @@
 #include "doomdef.h"
 #include "c_dispatch.h"
 #include "tarray.h"
-#include "thingdef/thingdef.h"
 #include "g_level.h"
 #include "d_net.h"
 #include "gstrings.h"
-#include "farchive.h"
+#include "serializer.h"
 #include "r_renderer.h"
+#include "d_player.h"
+#include "r_utility.h"
+#include "p_blockmap.h"
+#include "a_morph.h"
+#include "p_spec.h"
+#include "virtual.h"
+#include "a_armor.h"
+#include "a_ammo.h"
 
 static FRandom pr_skullpop ("SkullPop");
 
 // [RH] # of ticks to complete a turn180
 #define TURN180_TICKS	((TICRATE / 4) + 1)
+
+// [SP] Allows respawn in single player
+CVAR(Bool, sv_singleplayerrespawn, false, CVAR_SERVERINFO | CVAR_LATCH)
 
 // Variables for prediction
 CVAR (Bool, cl_noprediction, false, CVAR_ARCHIVE|CVAR_GLOBALCONFIG)
@@ -78,11 +88,8 @@ CUSTOM_CVAR(Float, cl_predict_lerpthreshold, 2.00f, CVAR_ARCHIVE | CVAR_GLOBALCO
 struct PredictPos
 {
 	int gametic;
-	fixed_t x;
-	fixed_t y;
-	fixed_t z;
-	fixed_t pitch;
-	fixed_t yaw;
+	DVector3 pos;
+	DRotator angles;
 } static PredictionLerpFrom, PredictionLerpResult, PredictionLast;
 static int PredictionLerptics;
 
@@ -129,26 +136,26 @@ bool FPlayerClass::CheckSkin (int skin)
 //
 //===========================================================================
 
-const char *GetPrintableDisplayName(const PClass *cls)
+FString GetPrintableDisplayName(PClassPlayerPawn *cls)
 { 
 	// Fixme; This needs a decent way to access the string table without creating a mess.
-	const char *name = cls->Meta.GetMetaString(APMETA_DisplayName);
-	return name;
+	// [RH] ????
+	return cls->DisplayName;
 }
 
-bool ValidatePlayerClass(const PClass *ti, const char *name)
+bool ValidatePlayerClass(PClassActor *ti, const char *name)
 {
-	if (!ti)
+	if (ti == NULL)
 	{
-		Printf ("Unknown player class '%s'\n", name);
+		Printf("Unknown player class '%s'\n", name);
 		return false;
 	}
-	else if (!ti->IsDescendantOf (RUNTIME_CLASS (APlayerPawn)))
+	else if (!ti->IsDescendantOf(RUNTIME_CLASS(APlayerPawn)))
 	{
-		Printf ("Invalid player class '%s'\n", name);
+		Printf("Invalid player class '%s'\n", name);
 		return false;
 	}
-	else if (ti->Meta.GetMetaString (APMETA_DisplayName) == NULL)
+	else if (static_cast<PClassPlayerPawn *>(ti)->DisplayName.IsEmpty())
 	{
 		Printf ("Missing displayname for player class '%s'\n", name);
 		return false;
@@ -161,18 +168,18 @@ void SetupPlayerClasses ()
 	FPlayerClass newclass;
 
 	PlayerClasses.Clear();
-	for (unsigned i=0; i<gameinfo.PlayerClasses.Size(); i++)
+	for (unsigned i = 0; i < gameinfo.PlayerClasses.Size(); i++)
 	{
-		newclass.Flags = 0;
-		newclass.Type = PClass::FindClass(gameinfo.PlayerClasses[i]);
-
-		if (ValidatePlayerClass(newclass.Type, gameinfo.PlayerClasses[i]))
+		PClassActor *cls = PClass::FindActor(gameinfo.PlayerClasses[i]);
+		if (ValidatePlayerClass(cls, gameinfo.PlayerClasses[i]))
 		{
-			if ((GetDefaultByType(newclass.Type)->flags6 & MF6_NOMENU))
+			newclass.Flags = 0;
+			newclass.Type = static_cast<PClassPlayerPawn *>(cls);
+			if ((GetDefaultByType(cls)->flags6 & MF6_NOMENU))
 			{
 				newclass.Flags |= PCF_NOMENU;
 			}
-			PlayerClasses.Push (newclass);
+			PlayerClasses.Push(newclass);
 		}
 	}
 }
@@ -189,17 +196,17 @@ CCMD (addplayerclass)
 {
 	if (ParsingKeyConf && argv.argc () > 1)
 	{
-		const PClass *ti = PClass::FindClass (argv[1]);
+		PClassActor *ti = PClass::FindActor(argv[1]);
 
 		if (ValidatePlayerClass(ti, argv[1]))
 		{
 			FPlayerClass newclass;
 
-			newclass.Type = ti;
+			newclass.Type = static_cast<PClassPlayerPawn *>(ti);
 			newclass.Flags = 0;
 
 			int arg = 2;
-			while (arg < argv.argc ())
+			while (arg < argv.argc())
 			{
 				if (!stricmp (argv[arg], "nomenu"))
 				{
@@ -212,7 +219,6 @@ CCMD (addplayerclass)
 
 				arg++;
 			}
-
 			PlayerClasses.Push (newclass);
 		}
 	}
@@ -224,7 +230,7 @@ CCMD (playerclasses)
 	{
 		Printf ("%3d: Class = %s, Name = %s\n", i,
 			PlayerClasses[i].Type->TypeName.GetChars(),
-			PlayerClasses[i].Type->Meta.GetMetaString (APMETA_DisplayName));
+			PlayerClasses[i].Type->DisplayName.GetChars());
 	}
 }
 
@@ -234,12 +240,7 @@ CCMD (playerclasses)
 //
 
 // 16 pixels of bob
-#define MAXBOB			0x100000
-
-FArchive &operator<< (FArchive &arc, player_t *&p)
-{
-	return arc.SerializePointer (players, (BYTE **)&p, sizeof(*players));
-}
+#define MAXBOB			16.
 
 // The player_t constructor. Since LogText is not a POD, we cannot just
 // memset it all to 0.
@@ -253,8 +254,7 @@ player_t::player_t()
   viewheight(0),
   deltaviewheight(0),
   bob(0),
-  velx(0),
-  vely(0),
+  Vel(0, 0),
   centering(0),
   turnticks(0),
   attackdown(0),
@@ -270,6 +270,7 @@ player_t::player_t()
   WeaponState(0),
   ReadyWeapon(0),
   PendingWeapon(0),
+  psprites(0),
   cheats(0),
   timefreezer(0),
   refire(0),
@@ -310,12 +311,16 @@ player_t::player_t()
   crouchviewdelta(0),
   ConversationNPC(0),
   ConversationPC(0),
-  ConversationNPCAngle(0),
+  ConversationNPCAngle(0.),
   ConversationFaceTalker(0)
 {
 	memset (&cmd, 0, sizeof(cmd));
 	memset (frags, 0, sizeof(frags));
-	memset (psprites, 0, sizeof(psprites));
+}
+
+player_t::~player_t()
+{
+	DestroyPSprites();
 }
 
 player_t &player_t::operator=(const player_t &p)
@@ -333,8 +338,7 @@ player_t &player_t::operator=(const player_t &p)
 	viewheight = p.viewheight;
 	deltaviewheight = p.deltaviewheight;
 	bob = p.bob;
-	velx = p.velx;
-	vely = p.vely;
+	Vel = p.Vel;
 	centering = p.centering;
 	turnticks = p.turnticks;
 	attackdown = p.attackdown;
@@ -372,7 +376,7 @@ player_t &player_t::operator=(const player_t &p)
 	extralight = p.extralight;
 	fixedcolormap = p.fixedcolormap;
 	fixedlightlevel = p.fixedlightlevel;
-	memcpy(psprites, &p.psprites, sizeof(psprites));
+	psprites = p.psprites;
 	morphTics = p.morphTics;
 	MorphedPlayerClass = p.MorphedPlayerClass;
 	MorphStyle = p.MorphStyle;
@@ -434,6 +438,7 @@ size_t player_t::FixPointers (const DObject *old, DObject *rep)
 	if (ReadyWeapon == old)			ReadyWeapon = static_cast<AWeapon *>(rep), changed++;
 	if (PendingWeapon == old)		PendingWeapon = static_cast<AWeapon *>(rep), changed++;
 	if (*&PremorphWeapon == old)	PremorphWeapon = static_cast<AWeapon *>(rep), changed++;
+	if (psprites == old)			psprites = static_cast<DPSprite *>(rep), changed++;
 	if (*&ConversationNPC == old)	ConversationNPC = replacement, changed++;
 	if (*&ConversationPC == old)	ConversationPC = replacement, changed++;
 	if (*&MUSINFOactor == old)		MUSINFOactor = replacement, changed++;
@@ -452,6 +457,7 @@ size_t player_t::PropagateMark()
 	GC::Mark(ConversationPC);
 	GC::Mark(MUSINFOactor);
 	GC::Mark(PremorphWeapon);
+	GC::Mark(psprites);
 	if (PendingWeapon != WP_NOCHANGE)
 	{
 		GC::Mark(PendingWeapon);
@@ -482,20 +488,123 @@ void player_t::SetLogNumber (int num)
 	}
 }
 
+DEFINE_ACTION_FUNCTION(_PlayerInfo, SetLogNumber)
+{
+	PARAM_SELF_STRUCT_PROLOGUE(player_t);
+	PARAM_INT(log);
+	self->SetLogNumber(log);
+	return 0;
+}
+
 void player_t::SetLogText (const char *text)
 {
 	LogText = text;
 
-	// Print log text to console
-	AddToConsole(-1, TEXTCOLOR_GOLD);
-	AddToConsole(-1, LogText);
-	AddToConsole(-1, "\n");
+	if (mo->CheckLocalView(consoleplayer))
+	{
+		// Print log text to console
+		AddToConsole(-1, TEXTCOLOR_GOLD);
+		AddToConsole(-1, LogText);
+		AddToConsole(-1, "\n");
+	}
+}
+
+DEFINE_ACTION_FUNCTION(_PlayerInfo, SetLogText)
+{
+	PARAM_SELF_STRUCT_PROLOGUE(player_t);
+	PARAM_STRING(log);
+	self->SetLogText(log);
+	return 0;
 }
 
 int player_t::GetSpawnClass()
 {
 	const PClass * type = PlayerClasses[CurrentPlayerClass].Type;
 	return static_cast<APlayerPawn*>(GetDefaultByType(type))->SpawnMask;
+}
+
+//===========================================================================
+//
+// PClassPlayerPawn
+//
+//===========================================================================
+
+IMPLEMENT_CLASS(PClassPlayerPawn, false, false)
+
+PClassPlayerPawn::PClassPlayerPawn()
+{
+	for (size_t i = 0; i < countof(HexenArmor); ++i)
+	{
+		HexenArmor[i] = 0;
+	}
+	ColorRangeStart = 0;
+	ColorRangeEnd = 0;
+}
+
+void PClassPlayerPawn::DeriveData(PClass *newclass)
+{
+	assert(newclass->IsKindOf(RUNTIME_CLASS(PClassPlayerPawn)));
+	Super::DeriveData(newclass);
+	PClassPlayerPawn *newp = static_cast<PClassPlayerPawn *>(newclass);
+	size_t i;
+
+	newp->DisplayName = DisplayName;
+	newp->SoundClass = SoundClass;
+	newp->Face = Face;
+	newp->InvulMode = InvulMode;
+	newp->HealingRadiusType = HealingRadiusType;
+	newp->ColorRangeStart = ColorRangeStart;
+	newp->ColorRangeEnd = ColorRangeEnd;
+	newp->ColorSets = ColorSets;
+	for (i = 0; i < countof(HexenArmor); ++i)
+	{
+		newp->HexenArmor[i] = HexenArmor[i];
+	}
+	for (i = 0; i < countof(Slot); ++i)
+	{
+		newp->Slot[i] = Slot[i];
+	}
+}
+
+static int intcmp(const void *a, const void *b)
+{
+	return *(const int *)a - *(const int *)b;
+}
+
+void PClassPlayerPawn::EnumColorSets(TArray<int> *out)
+{
+	out->Clear();
+	FPlayerColorSetMap::Iterator it(ColorSets);
+	FPlayerColorSetMap::Pair *pair;
+
+	while (it.NextPair(pair))
+	{
+		out->Push(pair->Key);
+	}
+	qsort(&(*out)[0], out->Size(), sizeof(int), intcmp);
+}
+
+//==========================================================================
+//
+//
+//==========================================================================
+
+bool PClassPlayerPawn::GetPainFlash(FName type, PalEntry *color) const
+{
+	const PClassPlayerPawn *info = this;
+
+	while (info != NULL)
+	{
+		const PalEntry *flash = info->PainFlashes.CheckKey(type);
+		if (flash != NULL)
+		{
+			*color = *flash;
+			return true;
+		}
+		// Try parent class
+		info = dyn_cast<PClassPlayerPawn>(info->ParentClass);
+	}
+	return false;
 }
 
 //===========================================================================
@@ -524,54 +633,43 @@ void player_t::SendPitchLimits() const
 //
 //===========================================================================
 
-IMPLEMENT_POINTY_CLASS (APlayerPawn)
- DECLARE_POINTER(InvFirst)
- DECLARE_POINTER(InvSel)
-END_POINTERS
+IMPLEMENT_CLASS(APlayerPawn, false, true)
 
-IMPLEMENT_CLASS (APlayerChunk)
+IMPLEMENT_POINTERS_START(APlayerPawn)
+	IMPLEMENT_POINTER(InvFirst)
+	IMPLEMENT_POINTER(InvSel)
+	IMPLEMENT_POINTER(FlechetteType)
+IMPLEMENT_POINTERS_END
 
-void APlayerPawn::Serialize (FArchive &arc)
+IMPLEMENT_CLASS(APlayerChunk, false, false)
+
+void APlayerPawn::Serialize(FSerializer &arc)
 {
 	Super::Serialize (arc);
+	auto def = (APlayerPawn*)GetDefault();
 
-	arc << JumpZ
-		<< MaxHealth
-		<< RunHealth
-		<< SpawnMask
-		<< ForwardMove1
-		<< ForwardMove2
-		<< SideMove1
-		<< SideMove2
-		<< ScoreIcon
-		<< InvFirst
-		<< InvSel
-		<< MorphWeapon
-		<< DamageFade
-		<< PlayerFlags
-		<< FlechetteType;
-	if (SaveVersion < 3829)
-	{
-		GruntSpeed = 12*FRACUNIT;
-		FallingScreamMinSpeed = 35*FRACUNIT;
-		FallingScreamMaxSpeed = 40*FRACUNIT;
-	}
-	else
-	{
-		arc << GruntSpeed << FallingScreamMinSpeed << FallingScreamMaxSpeed;
-	}
-	if (SaveVersion >= 4502)
-	{
-		arc << UseRange;
-	}
-	if (SaveVersion >= 4503)
-	{
-		arc << AirCapacity;
-	}
-	if (SaveVersion >= 4526)
-	{
-		arc << ViewHeight;
-	}
+	arc("jumpz", JumpZ, def->JumpZ)
+		("maxhealth", MaxHealth, def->MaxHealth)
+		("runhealth", RunHealth, def->RunHealth)
+		("spawnmask", SpawnMask, def->SpawnMask)
+		("forwardmove1", ForwardMove1, def->ForwardMove1)
+		("forwardmove2", ForwardMove2, def->ForwardMove2)
+		("sidemove1", SideMove1, def->SideMove1)
+		("sidemove2", SideMove2, def->SideMove2)
+		("scoreicon", ScoreIcon, def->ScoreIcon)
+		("invfirst", InvFirst)
+		("invsel", InvSel)
+		("morphweapon", MorphWeapon, def->MorphWeapon)
+		("damagefade", DamageFade, def->DamageFade)
+		("playerflags", PlayerFlags, def->PlayerFlags)
+		("flechettetype", FlechetteType, def->FlechetteType)
+		("gruntspeed", GruntSpeed, def->GruntSpeed)
+		("fallingscreammin", FallingScreamMinSpeed, def->FallingScreamMinSpeed)
+		("fallingscreammaxn", FallingScreamMaxSpeed, def->FallingScreamMaxSpeed)
+		("userange", UseRange, def->UseRange)
+		("aircapacity", AirCapacity, def->AirCapacity)
+		("viewheight", ViewHeight, def->ViewHeight)
+		("viewbob", ViewBob, def->ViewBob);
 }
 
 //===========================================================================
@@ -648,11 +746,11 @@ void APlayerPawn::Tick()
 {
 	if (player != NULL && player->mo == this && player->CanCrouch() && player->playerstate != PST_DEAD)
 	{
-		height = FixedMul(GetDefault()->height, player->crouchfactor);
+		Height = GetDefault()->Height * player->crouchfactor;
 	}
 	else
 	{
-		if (health > 0) height = GetDefault()->height;
+		if (health > 0) Height = GetDefault()->Height;
 	}
 	Super::Tick();
 }
@@ -671,10 +769,9 @@ void APlayerPawn::PostBeginPlay()
 	// Voodoo dolls: restore original floorz/ceilingz logic
 	if (player == NULL || player->mo != this)
 	{
-		dropoffz = floorz = Sector->floorplane.ZatPoint(x, y);
-		ceilingz = Sector->ceilingplane.ZatPoint(x, y);
+		P_FindFloorCeiling(this, FFCF_ONLYSPAWNPOS|FFCF_NOPORTALS);
+		SetZ(floorz);
 		P_FindFloorCeiling(this, FFCF_ONLYSPAWNPOS);
-		z = floorz;
 	}
 	else
 	{
@@ -834,7 +931,7 @@ bool APlayerPawn::UseInventory (AInventory *item)
 //
 //===========================================================================
 
-AWeapon *APlayerPawn::BestWeapon (const PClass *ammotype)
+AWeapon *APlayerPawn::BestWeapon(PClassAmmo *ammotype)
 {
 	AWeapon *bestMatch = NULL;
 	int bestOrder = INT_MAX;
@@ -896,7 +993,7 @@ AWeapon *APlayerPawn::BestWeapon (const PClass *ammotype)
 //
 //===========================================================================
 
-AWeapon *APlayerPawn::PickNewWeapon (const PClass *ammotype)
+AWeapon *APlayerPawn::PickNewWeapon(PClassAmmo *ammotype)
 {
 	AWeapon *best = BestWeapon (ammotype);
 
@@ -924,7 +1021,7 @@ AWeapon *APlayerPawn::PickNewWeapon (const PClass *ammotype)
 //
 //===========================================================================
 
-void APlayerPawn::CheckWeaponSwitch(const PClass *ammotype)
+void APlayerPawn::CheckWeaponSwitch(PClassAmmo *ammotype)
 {
 	if (!player->userinfo.GetNeverSwitch() &&
 		player->PendingWeapon == WP_NOCHANGE && 
@@ -951,14 +1048,14 @@ void APlayerPawn::CheckWeaponSwitch(const PClass *ammotype)
 
 void APlayerPawn::GiveDeathmatchInventory()
 {
-	for (unsigned int i = 0; i < PClass::m_Types.Size(); ++i)
+	for (unsigned int i = 0; i < PClassActor::AllActorClasses.Size(); ++i)
 	{
-		if (PClass::m_Types[i]->IsDescendantOf (RUNTIME_CLASS(AKey)))
+		if (PClassActor::AllActorClasses[i]->IsDescendantOf (RUNTIME_CLASS(AKey)))
 		{
-			AKey *key = (AKey *)GetDefaultByType (PClass::m_Types[i]);
+			AKey *key = (AKey *)GetDefaultByType (PClassActor::AllActorClasses[i]);
 			if (key->KeyNumber != 0)
 			{
-				key = static_cast<AKey *>(Spawn (PClass::m_Types[i], 0,0,0, NO_REPLACE));
+				key = static_cast<AKey *>(Spawn(static_cast<PClassActor *>(PClassActor::AllActorClasses[i])));
 				if (!key->CallTryPickup (this))
 				{
 					key->Destroy ();
@@ -1105,8 +1202,8 @@ const char *APlayerPawn::GetSoundClass() const
 	}
 
 	// [GRB]
-	const char *sclass = GetClass ()->Meta.GetMetaString (APMETA_SoundClass);
-	return sclass != NULL ? sclass : "player";
+	PClassPlayerPawn *pclass = GetClass();
+	return pclass->SoundClass.IsNotEmpty() ? pclass->SoundClass.GetChars() : "player";
 }
 
 //===========================================================================
@@ -1122,6 +1219,12 @@ int APlayerPawn::GetMaxHealth() const
 	return MaxHealth > 0? MaxHealth : ((i_compatflags&COMPATF_DEHHEALTH)? 100 : deh.MaxHealth);
 }
 
+DEFINE_ACTION_FUNCTION(APlayerPawn, GetMaxHealth)
+{
+	PARAM_SELF_PROLOGUE(APlayerPawn);
+	ACTION_RETURN_INT(self->GetMaxHealth());
+}
+
 //===========================================================================
 //
 // APlayerPawn :: UpdateWaterLevel
@@ -1130,10 +1233,10 @@ int APlayerPawn::GetMaxHealth() const
 //
 //===========================================================================
 
-bool APlayerPawn::UpdateWaterLevel (fixed_t oldz, bool splash)
+bool APlayerPawn::UpdateWaterLevel (bool splash)
 {
 	int oldlevel = waterlevel;
-	bool retval = Super::UpdateWaterLevel (oldz, splash);
+	bool retval = Super::UpdateWaterLevel (splash);
 	if (player != NULL)
 	{
 		if (oldlevel < 3 && waterlevel == 3)
@@ -1170,9 +1273,16 @@ bool APlayerPawn::ResetAirSupply (bool playgasp)
 	{
 		S_Sound (this, CHAN_VOICE, "*gasp", 1, ATTN_NORM);
 	}
-	if (level.airsupply> 0 && player->mo->AirCapacity > 0) player->air_finished = level.time + FixedMul(level.airsupply, player->mo->AirCapacity);
+	if (level.airsupply> 0 && player->mo->AirCapacity > 0) player->air_finished = level.time + int(level.airsupply * player->mo->AirCapacity);
 	else player->air_finished = INT_MAX;
 	return wasdrowning;
+}
+
+DEFINE_ACTION_FUNCTION(APlayerPawn, ResetAirSupply)
+{
+	PARAM_SELF_PROLOGUE(APlayerPawn);
+	PARAM_BOOL_DEF(playgasp);
+	ACTION_RETURN_BOOL(self->ResetAirSupply(playgasp));
 }
 
 //===========================================================================
@@ -1183,28 +1293,38 @@ bool APlayerPawn::ResetAirSupply (bool playgasp)
 
 void APlayerPawn::PlayIdle ()
 {
-	if (InStateSequence(state, SeeState))
-		SetState (SpawnState);
+	IFVIRTUAL(APlayerPawn, PlayIdle)
+	{
+		VMValue params[1] = { (DObject*)this };
+		GlobalVMStack.Call(func, params, 1, nullptr, 0, nullptr);
+	}
 }
 
 void APlayerPawn::PlayRunning ()
 {
-	if (InStateSequence(state, SpawnState) && SeeState != NULL)
-		SetState (SeeState);
+	IFVIRTUAL(APlayerPawn, PlayRunning)
+	{
+		VMValue params[1] = { (DObject*)this };
+		GlobalVMStack.Call(func, params, 1, nullptr, 0, nullptr);
+	}
 }
 
 void APlayerPawn::PlayAttacking ()
 {
-	if (MissileState != NULL) SetState (MissileState);
+	IFVIRTUAL(APlayerPawn, PlayAttacking)
+	{
+		VMValue params[1] = { (DObject*)this };
+		GlobalVMStack.Call(func, params, 1, nullptr, 0, nullptr);
+	}
 }
 
 void APlayerPawn::PlayAttacking2 ()
 {
-	if (MeleeState != NULL) SetState (MeleeState);
-}
-
-void APlayerPawn::ThrowPoisonBag ()
-{
+	IFVIRTUAL(APlayerPawn, PlayAttacking2)
+	{
+		VMValue params[1] = { (DObject*)this };
+		GlobalVMStack.Call(func, params, 1, nullptr, 0, nullptr);
+	}
 }
 
 //===========================================================================
@@ -1220,72 +1340,75 @@ void APlayerPawn::GiveDefaultInventory ()
 	// HexenArmor must always be the first item in the inventory because
 	// it provides player class based protection that should not affect
 	// any other protection item.
-	fixed_t hx[5];
-	for(int i=0;i<5;i++)
-	{
-		hx[i] = GetClass()->Meta.GetMetaFixed(APMETA_Hexenarmor0+i);
-	}
-	GiveInventoryType (RUNTIME_CLASS(AHexenArmor));
+	PClassPlayerPawn *myclass = GetClass();
+	GiveInventoryType(RUNTIME_CLASS(AHexenArmor));
 	AHexenArmor *harmor = FindInventory<AHexenArmor>();
-	harmor->Slots[4] = hx[0];
-	harmor->SlotsIncrement[0] = hx[1];
-	harmor->SlotsIncrement[1] = hx[2];
-	harmor->SlotsIncrement[2] = hx[3];
-	harmor->SlotsIncrement[3] = hx[4];
+	harmor->Slots[4] = myclass->HexenArmor[0];
+	for (int i = 0; i < 4; ++i)
+	{
+		harmor->SlotsIncrement[i] = myclass->HexenArmor[i + 1];
+	}
 
 	// BasicArmor must come right after that. It should not affect any
 	// other protection item as well but needs to process the damage
 	// before the HexenArmor does.
-	ABasicArmor *barmor = Spawn<ABasicArmor> (0,0,0, NO_REPLACE);
+	ABasicArmor *barmor = Spawn<ABasicArmor> ();
 	barmor->BecomeItem ();
 	barmor->SavePercent = 0;
 	barmor->Amount = 0;
 	AddInventory (barmor);
 
 	// Now add the items from the DECORATE definition
-	FDropItem *di = GetDropItems();
+	DDropItem *di = GetDropItems();
 
 	while (di)
 	{
-		const PClass *ti = PClass::FindClass (di->Name);
+		PClassActor *ti = PClass::FindActor (di->Name);
 		if (ti)
 		{
-			AInventory *item = FindInventory (ti);
-			if (item != NULL)
+			if (!ti->IsDescendantOf(RUNTIME_CLASS(AInventory)))
 			{
-				item->Amount = clamp<int>(
-					item->Amount + (di->amount ? di->amount : ((AInventory *)item->GetDefault ())->Amount),
-					0, item->MaxAmount);
+				Printf(TEXTCOLOR_ORANGE "%s is not an inventory item and cannot be given to a player as start item.\n", ti->TypeName.GetChars());
 			}
 			else
 			{
-				item = static_cast<AInventory *>(Spawn (ti, 0,0,0, NO_REPLACE));
-				item->ItemFlags|=IF_IGNORESKILL;	// no skill multiplicators here
-				item->Amount = di->amount;
-				if (item->IsKindOf (RUNTIME_CLASS (AWeapon)))
+				AInventory *item = FindInventory(ti);
+				if (item != NULL)
 				{
-					// To allow better control any weapon is emptied of
-					// ammo before being given to the player.
-					static_cast<AWeapon*>(item)->AmmoGive1 =
-					static_cast<AWeapon*>(item)->AmmoGive2 = 0;
+					item->Amount = clamp<int>(
+						item->Amount + (di->Amount ? di->Amount : ((AInventory *)item->GetDefault())->Amount),
+						0, item->MaxAmount);
 				}
-				AActor *check;
-				if (!item->CallTryPickup(this, &check))
+				else
 				{
-					if (check != this)
+					item = static_cast<AInventory *>(Spawn(ti));
+					item->ItemFlags |= IF_IGNORESKILL;	// no skill multiplicators here
+					item->Amount = di->Amount;
+					if (item->IsKindOf(RUNTIME_CLASS(AWeapon)))
 					{
-						// Player was morphed. This is illegal at game start.
-						// This problem is only detectable when it's too late to do something about it...
-						I_Error("Cannot give morph items when starting a game");
+						// To allow better control any weapon is emptied of
+						// ammo before being given to the player.
+						static_cast<AWeapon*>(item)->AmmoGive1 =
+							static_cast<AWeapon*>(item)->AmmoGive2 = 0;
 					}
-					item->Destroy ();
-					item = NULL;
+					AActor *check;
+					if (!item->CallTryPickup(this, &check))
+					{
+						if (check != this)
+						{
+							// Player was morphed. This is illegal at game start.
+							// This problem is only detectable when it's too late to do something about it...
+							I_Error("Cannot give morph items when starting a game");
+						}
+						item->Destroy();
+						item = NULL;
+					}
 				}
-			}
-			if (item != NULL && item->IsKindOf (RUNTIME_CLASS (AWeapon)) &&
-				static_cast<AWeapon*>(item)->CheckAmmo(AWeapon::EitherFire, false))
-			{
-				player->ReadyWeapon = player->PendingWeapon = static_cast<AWeapon *> (item);
+				if (item != NULL && item->IsKindOf(RUNTIME_CLASS(AWeapon)) &&
+					static_cast<AWeapon*>(item)->CheckAmmo(AWeapon::EitherFire, false))
+				{
+					player->ReadyWeapon = player->PendingWeapon = static_cast<AWeapon *> (item);
+				}
 			}
 		}
 		di = di->Next;
@@ -1294,40 +1417,48 @@ void APlayerPawn::GiveDefaultInventory ()
 
 void APlayerPawn::MorphPlayerThink ()
 {
+	IFVIRTUAL(APlayerPawn, MorphPlayerThink)
+	{
+		VMValue params[1] = { (DObject*)this };
+		GlobalVMStack.Call(func, params, 1, nullptr, 0, nullptr);
+	}
 }
 
 void APlayerPawn::ActivateMorphWeapon ()
 {
-	const PClass *morphweapon = PClass::FindClass (MorphWeapon);
+	PClassActor *morphweapon = PClass::FindActor (MorphWeapon);
 	player->PendingWeapon = WP_NOCHANGE;
-	player->psprites[ps_weapon].sy = WEAPONTOP;
 
-	if (morphweapon == NULL || !morphweapon->IsDescendantOf (RUNTIME_CLASS(AWeapon)))
+	if (player->ReadyWeapon != nullptr)
+	{
+		player->GetPSprite(PSP_WEAPON)->y = WEAPONTOP;
+	}
+
+	if (morphweapon == nullptr || !morphweapon->IsDescendantOf (RUNTIME_CLASS(AWeapon)))
 	{ // No weapon at all while morphed!
-		player->ReadyWeapon = NULL;
-		P_SetPsprite (player, ps_weapon, NULL);
+		player->ReadyWeapon = nullptr;
 	}
 	else
 	{
 		player->ReadyWeapon = static_cast<AWeapon *>(player->mo->FindInventory (morphweapon));
-		if (player->ReadyWeapon == NULL)
+		if (player->ReadyWeapon == nullptr)
 		{
 			player->ReadyWeapon = static_cast<AWeapon *>(player->mo->GiveInventoryType (morphweapon));
-			if (player->ReadyWeapon != NULL)
+			if (player->ReadyWeapon != nullptr)
 			{
 				player->ReadyWeapon->GivenAsMorphWeapon = true; // flag is used only by new beastweap semantics in P_UndoPlayerMorph
 			}
 		}
-		if (player->ReadyWeapon != NULL)
+		if (player->ReadyWeapon != nullptr)
 		{
-			P_SetPsprite (player, ps_weapon, player->ReadyWeapon->GetReadyState());
-		}
-		else
-		{
-			P_SetPsprite (player, ps_weapon, NULL);
+			P_SetPsprite(player, PSP_WEAPON, player->ReadyWeapon->GetReadyState());
 		}
 	}
-	P_SetPsprite (player, ps_flash, NULL);
+
+	if (player->ReadyWeapon != nullptr)
+	{
+		P_SetPsprite(player, PSP_FLASH, nullptr);
+	}
 
 	player->PendingWeapon = WP_NOCHANGE;
 }
@@ -1346,7 +1477,7 @@ void APlayerPawn::Die (AActor *source, AActor *inflictor, int dmgflags)
 
 	if (player != NULL && player->mo != this)
 	{ // Make the real player die, too
-		player->mo->Die (source, inflictor, dmgflags);
+		player->mo->CallDie (source, inflictor, dmgflags);
 	}
 	else
 	{
@@ -1358,7 +1489,7 @@ void APlayerPawn::Die (AActor *source, AActor *inflictor, int dmgflags)
 				AInventory *item;
 
 				// kgDROP - start - modified copy from a_action.cpp
-				FDropItem *di = weap->GetDropItems();
+				DDropItem *di = weap->GetDropItems();
 
 				if (di != NULL)
 				{
@@ -1366,8 +1497,8 @@ void APlayerPawn::Die (AActor *source, AActor *inflictor, int dmgflags)
 					{
 						if (di->Name != NAME_None)
 						{
-							const PClass *ti = PClass::FindClass(di->Name);
-							if (ti) P_DropItem (player->mo, ti, di->amount, di->probability);
+							PClassActor *ti = PClass::FindActor(di->Name);
+							if (ti) P_DropItem (player->mo, ti, di->Amount, di->Probability);
 						}
 						di = di->Next;
 					}
@@ -1420,38 +1551,39 @@ void APlayerPawn::Die (AActor *source, AActor *inflictor, int dmgflags)
 //
 //===========================================================================
 
-void APlayerPawn::TweakSpeeds (int &forward, int &side)
+void APlayerPawn::TweakSpeeds (double &forward, double &side)
 {
-	// Strife's player can't run when its healh is below 10
+	// Strife's player can't run when its health is below 10
 	if (health <= RunHealth)
 	{
-		forward = clamp(forward, -0x1900, 0x1900);
-		side = clamp(side, -0x1800, 0x1800);
+		forward = clamp<double>(forward, -0x1900, 0x1900);
+		side = clamp<double>(side, -0x1800, 0x1800);
 	}
 
 	// [GRB]
-	if ((unsigned int)(forward + 0x31ff) < 0x63ff)
+	if (fabs(forward) < 0x3200)
 	{
-		forward = FixedMul (forward, ForwardMove1);
+		forward *= ForwardMove1;
 	}
 	else
 	{
-		forward = FixedMul (forward, ForwardMove2);
+		forward *= ForwardMove2;
 	}
-	if ((unsigned int)(side + 0x27ff) < 0x4fff)
+
+	if (fabs(side) < 0x2800)
 	{
-		side = FixedMul (side, SideMove1);
+		side *= SideMove1;
 	}
 	else
 	{
-		side = FixedMul (side, SideMove2);
+		side *= SideMove2;
 	}
 
 	if (!player->morphTics && Inventory != NULL)
 	{
-		fixed_t factor = Inventory->GetSpeedFactor ();
-		forward = FixedMul(forward, factor);
-		side = FixedMul(side, factor);
+		double factor = Inventory->GetSpeedFactor ();
+		forward *= factor;
+		side *= factor;
 	}
 }
 
@@ -1466,6 +1598,8 @@ void APlayerPawn::TweakSpeeds (int &forward, int &side)
 
 DEFINE_ACTION_FUNCTION(AActor, A_PlayerScream)
 {
+	PARAM_SELF_PROLOGUE(AActor);
+
 	int sound = 0;
 	int chan = CHAN_VOICE;
 
@@ -1479,13 +1613,13 @@ DEFINE_ACTION_FUNCTION(AActor, A_PlayerScream)
 		{
 			S_Sound (self, CHAN_VOICE, "*death", 1, ATTN_NORM);
 		}
-		return;
+		return 0;
 	}
 
 	// Handle the different player death screams
 	if ((((level.flags >> 15) | (dmflags)) &
 		(DF_FORCE_FALLINGZD | DF_FORCE_FALLINGHX)) &&
-		self->velz <= -39*FRACUNIT)
+		self->Vel.Z <= -39)
 	{
 		sound = S_FindSkinnedSound (self, "*splat");
 		chan = CHAN_BODY;
@@ -1528,6 +1662,7 @@ DEFINE_ACTION_FUNCTION(AActor, A_PlayerScream)
 		}
 	}
 	S_Sound (self, chan, sound, 1, ATTN_NORM);
+	return 0;
 }
 
 
@@ -1537,34 +1672,35 @@ DEFINE_ACTION_FUNCTION(AActor, A_PlayerScream)
 //
 //----------------------------------------------------------------------------
 
-DEFINE_ACTION_FUNCTION_PARAMS(AActor, A_SkullPop)
+DEFINE_ACTION_FUNCTION(AActor, A_SkullPop)
 {
-	ACTION_PARAM_START(1);
-	ACTION_PARAM_CLASS(spawntype, 0);
+	PARAM_SELF_PROLOGUE(AActor);
+	PARAM_CLASS_DEF(spawntype, APlayerChunk);
 
 	APlayerPawn *mo;
 	player_t *player;
 
 	// [GRB] Parameterized version
-	if (!spawntype || !spawntype->IsDescendantOf (RUNTIME_CLASS (APlayerChunk)))
+	if (spawntype == NULL || !spawntype->IsDescendantOf(RUNTIME_CLASS(APlayerChunk)))
 	{
-		spawntype = PClass::FindClass("BloodySkull");
-		if (spawntype == NULL) return;
+		spawntype = dyn_cast<PClassPlayerPawn>(PClass::FindClass("BloodySkull"));
+		if (spawntype == NULL)
+			return 0;
 	}
 
 	self->flags &= ~MF_SOLID;
-	mo = (APlayerPawn *)Spawn (spawntype, self->x, self->y, self->z + 48*FRACUNIT, NO_REPLACE);
+	mo = (APlayerPawn *)Spawn (spawntype, self->PosPlusZ(48.), NO_REPLACE);
 	//mo->target = self;
-	mo->velx = pr_skullpop.Random2() << 9;
-	mo->vely = pr_skullpop.Random2() << 9;
-	mo->velz = 2*FRACUNIT + (pr_skullpop() << 6);
+	mo->Vel.X = pr_skullpop.Random2() / 128.;
+	mo->Vel.Y = pr_skullpop.Random2() / 128.;
+	mo->Vel.Z = 2. + (pr_skullpop() / 1024.);
 	// Attach player mobj to bloody skull
 	player = self->player;
 	self->player = NULL;
 	mo->ObtainInventory (self);
 	mo->player = player;
 	mo->health = self->health;
-	mo->angle = self->angle;
+	mo->Angles.Yaw = self->Angles.Yaw;
 	if (player != NULL)
 	{
 		player->mo = mo;
@@ -1577,6 +1713,7 @@ DEFINE_ACTION_FUNCTION_PARAMS(AActor, A_SkullPop)
 			players[i].camera = mo;
 		}
 	}
+	return 0;
 }
 
 //----------------------------------------------------------------------------
@@ -1587,10 +1724,13 @@ DEFINE_ACTION_FUNCTION_PARAMS(AActor, A_SkullPop)
 
 DEFINE_ACTION_FUNCTION(AActor, A_CheckPlayerDone)
 {
+	PARAM_SELF_PROLOGUE(AActor);
+
 	if (self->player == NULL)
 	{
-		self->Destroy ();
+		self->Destroy();
 	}
+	return 0;
 }
 
 //===========================================================================
@@ -1602,7 +1742,7 @@ DEFINE_ACTION_FUNCTION(AActor, A_CheckPlayerDone)
 //
 //===========================================================================
 
-void P_CheckPlayerSprite(AActor *actor, int &spritenum, fixed_t &scalex, fixed_t &scaley)
+void P_CheckPlayerSprite(AActor *actor, int &spritenum, DVector2 &scale)
 {
 	player_t *player = actor->player;
 	int crouchspriteno;
@@ -1610,14 +1750,13 @@ void P_CheckPlayerSprite(AActor *actor, int &spritenum, fixed_t &scalex, fixed_t
 	if (player->userinfo.GetSkin() != 0 && !(actor->flags4 & MF4_NOSKIN))
 	{
 		// Convert from default scale to skin scale.
-		fixed_t defscaleY = actor->GetDefault()->scaleY;
-		fixed_t defscaleX = actor->GetDefault()->scaleX;
-		scaley = Scale(scaley, skins[player->userinfo.GetSkin()].ScaleY, defscaleY);
-		scalex = Scale(scalex, skins[player->userinfo.GetSkin()].ScaleX, defscaleX);
+		DVector2 defscale = actor->GetDefault()->Scale;
+		scale.X *= skins[player->userinfo.GetSkin()].Scale.X / defscale.X;
+		scale.Y *= skins[player->userinfo.GetSkin()].Scale.Y / defscale.Y;
 	}
 
 	// Set the crouch sprite?
-	if (player->crouchfactor < FRACUNIT*3/4)
+	if (player->crouchfactor < 0.75)
 	{
 		if (spritenum == actor->SpawnState->sprite || spritenum == player->mo->crouchsprite) 
 		{
@@ -1638,9 +1777,9 @@ void P_CheckPlayerSprite(AActor *actor, int &spritenum, fixed_t &scalex, fixed_t
 		{
 			spritenum = crouchspriteno;
 		}
-		else if (player->playerstate != PST_DEAD && player->crouchfactor < FRACUNIT*3/4)
+		else if (player->playerstate != PST_DEAD && player->crouchfactor < 0.75)
 		{
-			scaley /= 2;
+			scale.Y *= 0.5;
 		}
 	}
 }
@@ -1655,30 +1794,23 @@ void P_CheckPlayerSprite(AActor *actor, int &spritenum, fixed_t &scalex, fixed_t
 ==================
 */
 
-void P_SideThrust (player_t *player, angle_t angle, fixed_t move)
+void P_SideThrust (player_t *player, DAngle angle, double move)
 {
-	angle = (angle - ANGLE_90) >> ANGLETOFINESHIFT;
-
-	player->mo->velx += FixedMul (move, finecosine[angle]);
-	player->mo->vely += FixedMul (move, finesine[angle]);
+	player->mo->Thrust(angle-90, move);
 }
 
-void P_ForwardThrust (player_t *player, angle_t angle, fixed_t move)
+void P_ForwardThrust (player_t *player, DAngle angle, double move)
 {
-	angle >>= ANGLETOFINESHIFT;
-
 	if ((player->mo->waterlevel || (player->mo->flags & MF_NOGRAVITY))
-		&& player->mo->pitch != 0)
+		&& player->mo->Angles.Pitch != 0)
 	{
-		angle_t pitch = (angle_t)player->mo->pitch >> ANGLETOFINESHIFT;
-		fixed_t zpush = FixedMul (move, finesine[pitch]);
+		double zpush = move * player->mo->Angles.Pitch.Sin();
 		if (player->mo->waterlevel && player->mo->waterlevel < 2 && zpush < 0)
 			zpush = 0;
-		player->mo->velz -= zpush;
-		move = FixedMul (move, finecosine[pitch]);
+		player->mo->Vel.Z -= zpush;
+		move *= player->mo->Angles.Pitch.Cos();
 	}
-	player->mo->velx += FixedMul (move, finecosine[angle]);
-	player->mo->vely += FixedMul (move, finesine[angle]);
+	player->mo->Thrust(angle, move);
 }
 
 //
@@ -1692,20 +1824,15 @@ void P_ForwardThrust (player_t *player, angle_t angle, fixed_t move)
 // reduced at a regular rate, even on ice (where the player coasts).
 //
 
-void P_Bob (player_t *player, angle_t angle, fixed_t move, bool forward)
+void P_Bob (player_t *player, DAngle angle, double move, bool forward)
 {
 	if (forward
 		&& (player->mo->waterlevel || (player->mo->flags & MF_NOGRAVITY))
-		&& player->mo->pitch != 0)
+		&& player->mo->Angles.Pitch != 0)
 	{
-		angle_t pitch = (angle_t)player->mo->pitch >> ANGLETOFINESHIFT;
-		move = FixedMul (move, finecosine[pitch]);
+		move *= player->mo->Angles.Pitch.Cos();
 	}
-
-	angle >>= ANGLETOFINESHIFT;
-
-	player->velx += FixedMul(move, finecosine[angle]);
-	player->vely += FixedMul(move, finesine[angle]);
+	player->Vel += angle.ToVector(move);
 }
 
 /*
@@ -1721,8 +1848,8 @@ Calculate the walking / running height adjustment
 
 void P_CalcHeight (player_t *player) 
 {
-	int 		angle;
-	fixed_t 	bob;
+	DAngle		angle;
+	double	 	bob;
 	bool		still = false;
 
 	// Regular movement bobbing
@@ -1740,32 +1867,32 @@ void P_CalcHeight (player_t *player)
 	}
 	else if ((player->mo->flags & MF_NOGRAVITY) && !player->onground)
 	{
-		player->bob = FRACUNIT / 2;
+		player->bob = 0.5;
 	}
 	else
 	{
-		player->bob = DMulScale16 (player->velx, player->velx, player->vely, player->vely);
+		player->bob = player->Vel.LengthSquared();
 		if (player->bob == 0)
 		{
 			still = true;
 		}
 		else
 		{
-			player->bob = FixedMul (player->bob, player->userinfo.GetMoveBob());
+			player->bob *= player->userinfo.GetMoveBob();
 
 			if (player->bob > MAXBOB)
 				player->bob = MAXBOB;
 		}
 	}
 
-	fixed_t defaultviewheight = player->mo->ViewHeight + player->crouchviewdelta;
+	double defaultviewheight = player->mo->ViewHeight + player->crouchviewdelta;
 
 	if (player->cheats & CF_NOVELOCITY)
 	{
-		player->viewz = player->mo->z + defaultviewheight;
+		player->viewz = player->mo->Z() + defaultviewheight;
 
-		if (player->viewz > player->mo->ceilingz-4*FRACUNIT)
-			player->viewz = player->mo->ceilingz-4*FRACUNIT;
+		if (player->viewz > player->mo->ceilingz-4)
+			player->viewz = player->mo->ceilingz-4;
 
 		return;
 	}
@@ -1774,8 +1901,8 @@ void P_CalcHeight (player_t *player)
 	{
 		if (player->health > 0)
 		{
-			angle = DivScale13 (level.time, 120*TICRATE/35) & FINEMASK;
-			bob = FixedMul (player->userinfo.GetStillBob(), finesine[angle]);
+			angle = level.time / (120 * TICRATE / 35.) * 360.;
+			bob = player->userinfo.GetStillBob() * angle.Sin();
 		}
 		else
 		{
@@ -1784,9 +1911,8 @@ void P_CalcHeight (player_t *player)
 	}
 	else
 	{
-		// DivScale 13 because FINEANGLES == (1<<13)
-		angle = DivScale13 (level.time, 20*TICRATE/35) & FINEMASK;
-		bob = FixedMul (player->bob>>(player->mo->waterlevel > 1 ? 2 : 1), finesine[angle]);
+		angle = level.time / (20 * TICRATE / 35.) * 360.;
+		bob = player->bob * angle.Sin() * (player->mo->waterlevel > 1 ? 0.25f : 0.5f);
 	}
 
 	// move viewheight
@@ -1799,18 +1925,18 @@ void P_CalcHeight (player_t *player)
 			player->viewheight = defaultviewheight;
 			player->deltaviewheight = 0;
 		}
-		else if (player->viewheight < (defaultviewheight>>1))
+		else if (player->viewheight < (defaultviewheight/2))
 		{
-			player->viewheight = defaultviewheight>>1;
+			player->viewheight = defaultviewheight/2;
 			if (player->deltaviewheight <= 0)
-				player->deltaviewheight = 1;
+				player->deltaviewheight = 1 / 65536.;
 		}
 		
 		if (player->deltaviewheight)	
 		{
-			player->deltaviewheight += FRACUNIT/4;
+			player->deltaviewheight += 0.25;
 			if (!player->deltaviewheight)
-				player->deltaviewheight = 1;
+				player->deltaviewheight = 1/65536.;
 		}
 	}
 
@@ -1818,19 +1944,19 @@ void P_CalcHeight (player_t *player)
 	{
 		bob = 0;
 	}
-	player->viewz = player->mo->z + player->viewheight + bob;
-	if (player->mo->floorclip && player->playerstate != PST_DEAD
-		&& player->mo->z <= player->mo->floorz)
+	player->viewz = player->mo->Z() + player->viewheight + (bob * player->mo->ViewBob); // [SP] Allow DECORATE changes to view bobbing speed.
+	if (player->mo->Floorclip && player->playerstate != PST_DEAD
+		&& player->mo->Z() <= player->mo->floorz)
 	{
-		player->viewz -= player->mo->floorclip;
+		player->viewz -= player->mo->Floorclip;
 	}
-	if (player->viewz > player->mo->ceilingz - 4*FRACUNIT)
+	if (player->viewz > player->mo->ceilingz - 4)
 	{
-		player->viewz = player->mo->ceilingz - 4*FRACUNIT;
+		player->viewz = player->mo->ceilingz - 4;
 	}
-	if (player->viewz < player->mo->floorz + 4*FRACUNIT)
+	if (player->viewz < player->mo->floorz + 4)
 	{
-		player->viewz = player->mo->floorz + 4*FRACUNIT;
+		player->viewz = player->mo->floorz + 4;
 	}
 }
 
@@ -1843,7 +1969,7 @@ void P_CalcHeight (player_t *player)
 */
 CUSTOM_CVAR (Float, sv_aircontrol, 0.00390625f, CVAR_SERVERINFO|CVAR_NOSAVE)
 {
-	level.aircontrol = (fixed_t)(self * 65536.f);
+	level.aircontrol = self;
 	G_AirControlChanged ();
 }
 
@@ -1856,14 +1982,14 @@ void P_MovePlayer (player_t *player)
 	if (player->turnticks)
 	{
 		player->turnticks--;
-		mo->angle += (ANGLE_180 / TURN180_TICKS);
+		mo->Angles.Yaw += (180. / TURN180_TICKS);
 	}
 	else
 	{
-		mo->angle += cmd->ucmd.yaw << 16;
+		mo->Angles.Yaw += cmd->ucmd.yaw * (360./65536.);
 	}
 
-	player->onground = (mo->z <= mo->floorz) || (mo->flags2 & MF2_ONMOBJ) || (mo->BounceFlags & BOUNCE_MBF) || (player->cheats & CF_NOCLIP2);
+	player->onground = (mo->Z() <= mo->floorz) || (mo->flags2 & MF2_ONMOBJ) || (mo->BounceFlags & BOUNCE_MBF) || (player->cheats & CF_NOCLIP2);
 
 	// killough 10/98:
 	//
@@ -1874,53 +2000,53 @@ void P_MovePlayer (player_t *player)
 
 	if (cmd->ucmd.forwardmove | cmd->ucmd.sidemove)
 	{
-		fixed_t forwardmove, sidemove;
-		int bobfactor;
-		int friction, movefactor;
-		int fm, sm;
+		double forwardmove, sidemove;
+		double bobfactor;
+		double friction, movefactor;
+		double fm, sm;
 
 		movefactor = P_GetMoveFactor (mo, &friction);
 		bobfactor = friction < ORIG_FRICTION ? movefactor : ORIG_FRICTION_FACTOR;
 		if (!player->onground && !(player->mo->flags & MF_NOGRAVITY) && !player->mo->waterlevel)
 		{
 			// [RH] allow very limited movement if not on ground.
-			movefactor = FixedMul (movefactor, level.aircontrol);
-			bobfactor = FixedMul (bobfactor, level.aircontrol);
+			movefactor *= level.aircontrol;
+			bobfactor*= level.aircontrol;
 		}
 
 		fm = cmd->ucmd.forwardmove;
 		sm = cmd->ucmd.sidemove;
 		mo->TweakSpeeds (fm, sm);
-		fm = FixedMul (fm, player->mo->Speed);
-		sm = FixedMul (sm, player->mo->Speed);
+		fm *= player->mo->Speed / 256;
+		sm *= player->mo->Speed / 256;
 
 		// When crouching, speed and bobbing have to be reduced
-		if (player->CanCrouch() && player->crouchfactor != FRACUNIT)
+		if (player->CanCrouch() && player->crouchfactor != 1)
 		{
-			fm = FixedMul(fm, player->crouchfactor);
-			sm = FixedMul(sm, player->crouchfactor);
-			bobfactor = FixedMul(bobfactor, player->crouchfactor);
+			fm *= player->crouchfactor;
+			sm *= player->crouchfactor;
+			bobfactor *= player->crouchfactor;
 		}
 
-		forwardmove = Scale (fm, movefactor * 35, TICRATE << 8);
-		sidemove = Scale (sm, movefactor * 35, TICRATE << 8);
+		forwardmove = fm * movefactor * (35 / TICRATE);
+		sidemove = sm * movefactor * (35 / TICRATE);
 
 		if (forwardmove)
 		{
-			P_Bob (player, mo->angle, (cmd->ucmd.forwardmove * bobfactor) >> 8, true);
-			P_ForwardThrust (player, mo->angle, forwardmove);
+			P_Bob(player, mo->Angles.Yaw, cmd->ucmd.forwardmove * bobfactor / 256., true);
+			P_ForwardThrust(player, mo->Angles.Yaw, forwardmove);
 		}
 		if (sidemove)
 		{
-			P_Bob (player, mo->angle-ANG90, (cmd->ucmd.sidemove * bobfactor) >> 8, false);
-			P_SideThrust (player, mo->angle, sidemove);
+			P_Bob(player, mo->Angles.Yaw - 90, cmd->ucmd.sidemove * bobfactor / 256., false);
+			P_SideThrust(player, mo->Angles.Yaw, sidemove);
 		}
 
 		if (debugfile)
 		{
-			fprintf (debugfile, "move player for pl %d%c: (%d,%d,%d) (%d,%d) %d %d w%d [", int(player-players),
+			fprintf (debugfile, "move player for pl %d%c: (%f,%f,%f) (%f,%f) %f %f w%d [", int(player-players),
 				player->cheats&CF_PREDICTING?'p':' ',
-				player->mo->x, player->mo->y, player->mo->z,forwardmove, sidemove, movefactor, friction, player->mo->waterlevel);
+				player->mo->X(), player->mo->Y(), player->mo->Z(),forwardmove, sidemove, movefactor, friction, player->mo->waterlevel);
 			msecnode_t *n = player->mo->touching_sectorlist;
 			while (n != NULL)
 			{
@@ -1930,7 +2056,7 @@ void P_MovePlayer (player_t *player)
 			fprintf (debugfile, "]\n");
 		}
 
-		if (!(player->cheats & CF_PREDICTING) && (forwardmove|sidemove))
+		if (!(player->cheats & CF_PREDICTING) && (forwardmove != 0 || sidemove != 0))
 		{
 			player->mo->PlayRunning ();
 		}
@@ -1953,7 +2079,7 @@ void P_FallingDamage (AActor *actor)
 {
 	int damagestyle;
 	int damage;
-	fixed_t vel;
+	double vel;
 
 	damagestyle = ((level.flags >> 15) | (dmflags)) &
 		(DF_FORCE_FALLINGZD | DF_FORCE_FALLINGHX);
@@ -1964,7 +2090,7 @@ void P_FallingDamage (AActor *actor)
 	if (actor->floorsector->Flags & SECF_NOFALLINGDAMAGE)
 		return;
 
-	vel = abs(actor->velz);
+	vel = fabs(actor->Vel.Z);
 
 	// Since Hexen falling damage is stronger than ZDoom's, it takes
 	// precedence. ZDoom falling damage may not be as strong, but it
@@ -1973,19 +2099,19 @@ void P_FallingDamage (AActor *actor)
 	switch (damagestyle)
 	{
 	case DF_FORCE_FALLINGHX:		// Hexen falling damage
-		if (vel <= 23*FRACUNIT)
+		if (vel <= 23)
 		{ // Not fast enough to hurt
 			return;
 		}
-		if (vel >= 63*FRACUNIT)
+		if (vel >= 63)
 		{ // automatic death
 			damage = 1000000;
 		}
 		else
 		{
-			vel = FixedMul (vel, 16*FRACUNIT/23);
-			damage = ((FixedMul (vel, vel) / 10) >> FRACBITS) - 24;
-			if (actor->velz > -39*FRACUNIT && damage > actor->health
+			vel *= (16. / 23);
+			damage = int((vel * vel) / 10 - 24);
+			if (actor->Vel.Z > -39 && damage > actor->health
 				&& actor->health != 1)
 			{ // No-death threshold
 				damage = actor->health-1;
@@ -1994,17 +2120,17 @@ void P_FallingDamage (AActor *actor)
 		break;
 	
 	case DF_FORCE_FALLINGZD:		// ZDoom falling damage
-		if (vel <= 19*FRACUNIT)
+		if (vel <= 19)
 		{ // Not fast enough to hurt
 			return;
 		}
-		if (vel >= 84*FRACUNIT)
+		if (vel >= 84)
 		{ // automatic death
 			damage = 1000000;
 		}
 		else
 		{
-			damage = ((MulScale23 (vel, vel*11) >> FRACBITS) - 30) / 2;
+			damage = int((vel*vel*(11 / 128.) - 30) / 2);
 			if (damage < 1)
 			{
 				damage = 1;
@@ -2013,13 +2139,13 @@ void P_FallingDamage (AActor *actor)
 		break;
 
 	case DF_FORCE_FALLINGST:		// Strife falling damage
-		if (vel <= 20*FRACUNIT)
+		if (vel <= 20)
 		{ // Not fast enough to hurt
 			return;
 		}
 		// The minimum amount of damage you take from falling in Strife
 		// is 52. Ouch!
-		damage = vel / 25000;
+		damage = int(vel / (25000./65536.));
 		break;
 
 	default:
@@ -2047,47 +2173,46 @@ void P_FallingDamage (AActor *actor)
 void P_DeathThink (player_t *player)
 {
 	int dir;
-	angle_t delta;
-	int lookDelta;
+	DAngle delta;
 
-	P_MovePsprites (player);
+	player->TickPSprites();
 
-	player->onground = (player->mo->z <= player->mo->floorz);
+	player->onground = (player->mo->Z() <= player->mo->floorz);
 	if (player->mo->IsKindOf (RUNTIME_CLASS(APlayerChunk)))
 	{ // Flying bloody skull or flying ice chunk
-		player->viewheight = 6 * FRACUNIT;
+		player->viewheight = 6;
 		player->deltaviewheight = 0;
 		if (player->onground)
 		{
-			if (player->mo->pitch > -(int)ANGLE_1*19)
+			if (player->mo->Angles.Pitch > -19.)
 			{
-				lookDelta = (-(int)ANGLE_1*19 - player->mo->pitch) / 8;
-				player->mo->pitch += lookDelta;
+				DAngle lookDelta = (-19. - player->mo->Angles.Pitch) / 8;
+				player->mo->Angles.Pitch += lookDelta;
 			}
 		}
 	}
 	else if (!(player->mo->flags & MF_ICECORPSE))
 	{ // Fall to ground (if not frozen)
 		player->deltaviewheight = 0;
-		if (player->viewheight > 6*FRACUNIT)
+		if (player->viewheight > 6)
 		{
-			player->viewheight -= FRACUNIT;
+			player->viewheight -= 1;
 		}
-		if (player->viewheight < 6*FRACUNIT)
+		if (player->viewheight < 6)
 		{
-			player->viewheight = 6*FRACUNIT;
+			player->viewheight = 6;
 		}
-		if (player->mo->pitch < 0)
+		if (player->mo->Angles.Pitch < 0)
 		{
-			player->mo->pitch += ANGLE_1*3;
+			player->mo->Angles.Pitch += 3;
 		}
-		else if (player->mo->pitch > 0)
+		else if (player->mo->Angles.Pitch > 0)
 		{
-			player->mo->pitch -= ANGLE_1*3;
+			player->mo->Angles.Pitch -= 3;
 		}
-		if (abs(player->mo->pitch) < ANGLE_1*3)
+		if (fabs(player->mo->Angles.Pitch) < 3)
 		{
-			player->mo->pitch = 0;
+			player->mo->Angles.Pitch = 0.;
 		}
 	}
 	P_CalcHeight (player);
@@ -2095,7 +2220,7 @@ void P_DeathThink (player_t *player)
 	if (player->attacker && player->attacker != player->mo)
 	{ // Watch killer
 		dir = P_FaceMobj (player->mo, player->attacker, &delta);
-		if (delta < ANGLE_1*10)
+		if (delta < 10)
 		{ // Looking at killer, so fade damage and poison counters
 			if (player->damagecount)
 			{
@@ -2107,17 +2232,17 @@ void P_DeathThink (player_t *player)
 			}
 		}
 		delta /= 8;
-		if (delta > ANGLE_1*5)
+		if (delta > 5.)
 		{
-			delta = ANGLE_1*5;
+			delta = 5.;
 		}
 		if (dir)
 		{ // Turn clockwise
-			player->mo->angle += delta;
+			player->mo->Angles.Yaw += delta;
 		}
 		else
 		{ // Turn counter clockwise
-			player->mo->angle -= delta;
+			player->mo->Angles.Yaw -= delta;
 		}
 	}
 	else
@@ -2138,7 +2263,9 @@ void P_DeathThink (player_t *player)
 		if (level.time >= player->respawn_time || ((player->cmd.ucmd.buttons & BT_USE) && player->Bot == NULL))
 		{
 			player->cls = NULL;		// Force a new class if the player is using a random class
-			player->playerstate = (multiplayer || (level.flags2 & LEVEL2_ALLOWRESPAWN)) ? PST_REBORN : PST_ENTER;
+			player->playerstate = 
+				(multiplayer || (level.flags2 & LEVEL2_ALLOWRESPAWN) || sv_singleplayerrespawn)
+				? PST_REBORN : PST_ENTER;
 			if (player->mo->special1 > 2)
 			{
 				player->mo->special1 = 0;
@@ -2155,19 +2282,19 @@ void P_DeathThink (player_t *player)
 
 void P_CrouchMove(player_t * player, int direction)
 {
-	fixed_t defaultheight = player->mo->GetDefault()->height;
-	fixed_t savedheight = player->mo->height;
-	fixed_t crouchspeed = direction * CROUCHSPEED;
-	fixed_t oldheight = player->viewheight;
+	double defaultheight = player->mo->GetDefault()->Height;
+	double savedheight = player->mo->Height;
+	double crouchspeed = direction * CROUCHSPEED;
+	double oldheight = player->viewheight;
 
 	player->crouchdir = (signed char) direction;
 	player->crouchfactor += crouchspeed;
 
 	// check whether the move is ok
-	player->mo->height = FixedMul(defaultheight, player->crouchfactor);
-	if (!P_TryMove(player->mo, player->mo->x, player->mo->y, false, NULL))
+	player->mo->Height  = defaultheight * player->crouchfactor;
+	if (!P_TryMove(player->mo, player->mo->Pos(), false, NULL))
 	{
-		player->mo->height = savedheight;
+		player->mo->Height = savedheight;
 		if (direction > 0)
 		{
 			// doesn't fit
@@ -2175,14 +2302,14 @@ void P_CrouchMove(player_t * player, int direction)
 			return;
 		}
 	}
-	player->mo->height = savedheight;
+	player->mo->Height = savedheight;
 
-	player->crouchfactor = clamp<fixed_t>(player->crouchfactor, FRACUNIT/2, FRACUNIT);
-	player->viewheight = FixedMul(player->mo->ViewHeight, player->crouchfactor);
+	player->crouchfactor = clamp(player->crouchfactor, 0.5, 1.);
+	player->viewheight = player->mo->ViewHeight * player->crouchfactor;
 	player->crouchviewdelta = player->viewheight - player->mo->ViewHeight;
 
 	// Check for eyes going above/below fake floor due to crouching motion.
-	P_CheckFakeFloorTriggers(player->mo, player->mo->z + oldheight, true);
+	P_CheckFakeFloorTriggers(player->mo, player->mo->Z() + oldheight, true);
 }
 
 //----------------------------------------------------------------------------
@@ -2202,9 +2329,9 @@ void P_PlayerThink (player_t *player)
 
 	if (debugfile && !(player->cheats & CF_PREDICTING))
 	{
-		fprintf (debugfile, "tic %d for pl %td: (%d, %d, %d, %u) b:%02x p:%d y:%d f:%d s:%d u:%d\n",
-			gametic, player-players, player->mo->x, player->mo->y, player->mo->z,
-			player->mo->angle>>ANGLETOFINESHIFT, player->cmd.ucmd.buttons,
+		fprintf (debugfile, "tic %d for pl %d: (%f, %f, %f, %f) b:%02x p:%d y:%d f:%d s:%d u:%d\n",
+			gametic, (int)(player-players), player->mo->X(), player->mo->Y(), player->mo->Z(),
+			player->mo->Angles.Yaw.Degrees, player->cmd.ucmd.buttons,
 			player->cmd.ucmd.pitch, player->cmd.ucmd.yaw, player->cmd.ucmd.forwardmove,
 			player->cmd.ucmd.sidemove, player->cmd.ucmd.upmove);
 	}
@@ -2218,7 +2345,7 @@ void P_PlayerThink (player_t *player)
 	{
 		// A negative scale is used to prevent G_AddViewAngle/G_AddViewPitch
 		// from scaling with the FOV scale.
-		desired *= fabs(player->ReadyWeapon->FOVScale);
+		desired *= fabsf(player->ReadyWeapon->FOVScale);
 	}
 	if (player->FOV != desired)
 	{
@@ -2328,12 +2455,12 @@ void P_PlayerThink (player_t *player)
 			{
 				player->crouching = 0;
 			}
-			if (crouchdir == 1 && player->crouchfactor < FRACUNIT &&
-				player->mo->z + player->mo->height < player->mo->ceilingz)
+			if (crouchdir == 1 && player->crouchfactor < 1 &&
+				player->mo->Top() < player->mo->ceilingz)
 			{
 				P_CrouchMove(player, 1);
 			}
-			else if (crouchdir == -1 && player->crouchfactor > FRACUNIT/2)
+			else if (crouchdir == -1 && player->crouchfactor > 0.5)
 			{
 				P_CrouchMove(player, -1);
 			}
@@ -2344,7 +2471,7 @@ void P_PlayerThink (player_t *player)
 		player->Uncrouch();
 	}
 
-	player->crouchoffset = -FixedMul(player->mo->ViewHeight, (FRACUNIT - player->crouchfactor));
+	player->crouchoffset = -(player->mo->ViewHeight) * (1 - player->crouchfactor);
 
 	// MUSINFO stuff
 	if (player->MUSINFOtics >= 0 && player->MUSINFOactor != NULL)
@@ -2367,7 +2494,7 @@ void P_PlayerThink (player_t *player)
 					S_ChangeMusic("*");
 				}
 			}
-			DPrintf("MUSINFO change for player %d to %d\n", (int)(player - players), player->MUSINFOactor->args[0]);
+			DPrintf(DMSG_NOTIFY, "MUSINFO change for player %d to %d\n", (int)(player - players), player->MUSINFOactor->args[0]);
 		}
 	}
 
@@ -2393,54 +2520,37 @@ void P_PlayerThink (player_t *player)
 	// [RH] Look up/down stuff
 	if (!level.IsFreelookAllowed())
 	{
-		player->mo->pitch = 0;
+		player->mo->Angles.Pitch = 0.;
 	}
 	else
 	{
-		int look = cmd->ucmd.pitch << 16;
-
 		// The player's view pitch is clamped between -32 and +56 degrees,
 		// which translates to about half a screen height up and (more than)
 		// one full screen height down from straight ahead when view panning
 		// is used.
-		if (look)
+		int clook = cmd->ucmd.pitch;
+		if (clook != 0)
 		{
-			if (look == -32768 << 16)
+			if (clook == -32768)
 			{ // center view
 				player->centering = true;
 			}
 			else if (!player->centering)
 			{
-				fixed_t oldpitch = player->mo->pitch;
-				player->mo->pitch -= look;
-				if (look > 0)
-				{ // look up
-					player->mo->pitch = MAX(player->mo->pitch, player->MinPitch);
-					if (player->mo->pitch > oldpitch)
-					{
-						player->mo->pitch = player->MinPitch;
-					}
-				}
-				else
-				{ // look down
-					player->mo->pitch = MIN(player->mo->pitch, player->MaxPitch);
-					if (player->mo->pitch < oldpitch)
-					{
-						player->mo->pitch = player->MaxPitch;
-					}
-				}
+				// no more overflows with floating point. Yay! :)
+				player->mo->Angles.Pitch = clamp(player->mo->Angles.Pitch - clook * (360. / 65536.), player->MinPitch, player->MaxPitch);
 			}
 		}
 	}
 	if (player->centering)
 	{
-		if (abs(player->mo->pitch) > 2*ANGLE_1)
+		if (fabs(player->mo->Angles.Pitch) > 2.)
 		{
-			player->mo->pitch = FixedMul(player->mo->pitch, FRACUNIT*2/3);
+			player->mo->Angles.Pitch *= (2. / 3.);
 		}
 		else
 		{
-			player->mo->pitch = 0;
+			player->mo->Angles.Pitch = 0.;
 			player->centering = false;
 			if (player - players == consoleplayer)
 			{
@@ -2474,20 +2584,20 @@ void P_PlayerThink (player_t *player)
 			}
 			else if (player->mo->waterlevel >= 2)
 			{
-				player->mo->velz = FixedMul(4*FRACUNIT, player->mo->Speed);
+				player->mo->Vel.Z = 4 * player->mo->Speed;
 			}
 			else if (player->mo->flags & MF_NOGRAVITY)
 			{
-				player->mo->velz = 3*FRACUNIT;
+				player->mo->Vel.Z = 3.;
 			}
 			else if (level.IsJumpingAllowed() && player->onground && player->jumpTics == 0)
 			{
-				fixed_t jumpvelz = player->mo->JumpZ * 35 / TICRATE;
+				double jumpvelz = player->mo->JumpZ * 35 / TICRATE;
 
 				// [BC] If the player has the high jump power, double his jump velocity.
 				if ( player->cheats & CF_HIGHJUMP )	jumpvelz *= 2;
 
-				player->mo->velz += jumpvelz;
+				player->mo->Vel.Z += jumpvelz;
 				player->mo->flags2 &= ~MF2_ONMOBJ;
 				player->jumpTics = -1;
 				if (!(player->cheats & CF_PREDICTING))
@@ -2506,19 +2616,15 @@ void P_PlayerThink (player_t *player)
 		else if (cmd->ucmd.upmove != 0)
 		{
 			// Clamp the speed to some reasonable maximum.
-			int magnitude = abs (cmd->ucmd.upmove);
-			if (magnitude > 0x300)
-			{
-				cmd->ucmd.upmove = ksgn (cmd->ucmd.upmove) * 0x300;
-			}
+			cmd->ucmd.upmove = clamp<short>(cmd->ucmd.upmove, -0x300, 0x300);
 			if (player->mo->waterlevel >= 2 || (player->mo->flags2 & MF2_FLY) || (player->cheats & CF_NOCLIP2))
 			{
-				player->mo->velz = FixedMul(player->mo->Speed, cmd->ucmd.upmove << 9);
+				player->mo->Vel.Z = player->mo->Speed * cmd->ucmd.upmove / 128.;
 				if (player->mo->waterlevel < 2 && !(player->mo->flags & MF_NOGRAVITY))
 				{
 					player->mo->flags2 |= MF2_FLY;
 					player->mo->flags |= MF_NOGRAVITY;
-					if ((player->mo->velz <= -39 * FRACUNIT) && !(player->cheats & CF_PREDICTING))
+					if ((player->mo->Vel.Z <= -39) && !(player->cheats & CF_PREDICTING))
 					{ // Stop falling scream
 						S_StopSound (player->mo, CHAN_VOICE);
 					}
@@ -2542,15 +2648,14 @@ void P_PlayerThink (player_t *player)
 		P_PlayerOnSpecial3DFloor (player);
 		P_PlayerInSpecialSector (player);
 
-		if (player->mo->z <= player->mo->Sector->floorplane.ZatPoint(
-			player->mo->x, player->mo->y) ||
+		if (!player->mo->isAbove(player->mo->Sector->floorplane.ZatPoint(player->mo)) ||
 			player->mo->waterlevel)
 		{
 			// Player must be touching the floor
 			P_PlayerOnSpecialFlat(player, P_GetThingFloorType(player->mo));
 		}
-		if (player->mo->velz <= -player->mo->FallingScreamMinSpeed &&
-			player->mo->velz >= -player->mo->FallingScreamMaxSpeed && !player->morphTics &&
+		if (player->mo->Vel.Z <= -player->mo->FallingScreamMinSpeed &&
+			player->mo->Vel.Z >= -player->mo->FallingScreamMaxSpeed && !player->morphTics &&
 			player->mo->waterlevel == 0)
 		{
 			int id = S_FindSkinnedSound (player->mo, "*falling");
@@ -2588,7 +2693,7 @@ void P_PlayerThink (player_t *player)
 			}
 		}
 		// Cycle psprites
-		P_MovePsprites (player);
+		player->TickPSprites();
 
 		// Other Counters
 		if (player->damagecount)
@@ -2617,10 +2722,11 @@ void P_PlayerThink (player_t *player)
 		// Apply degeneration.
 		if (dmflags2 & DF2_YES_DEGENERATION)
 		{
-			if ((level.time % TICRATE) == 0 && player->health > deh.MaxHealth)
+			int maxhealth = player->mo->GetMaxHealth() + player->mo->stamina;
+			if ((level.time % TICRATE) == 0 && player->health > maxhealth)
 			{
-				if (player->health - 5 < deh.MaxHealth)
-					player->health = deh.MaxHealth;
+				if (player->health - 5 < maxhealth)
+					player->health = maxhealth;
 				else
 					player->health--;
 
@@ -2651,19 +2757,19 @@ void P_PredictionLerpReset()
 	PredictionLerptics = PredictionLast.gametic = PredictionLerpFrom.gametic = PredictionLerpResult.gametic = 0;
 }
 
-bool P_LerpCalculate(PredictPos from, PredictPos to, PredictPos &result, float scale)
+bool P_LerpCalculate(AActor *pmo, PredictPos from, PredictPos to, PredictPos &result, float scale)
 {
-	FVector3 vecFrom(FIXED2DBL(from.x), FIXED2DBL(from.y), FIXED2DBL(from.z));
-	FVector3 vecTo(FIXED2DBL(to.x), FIXED2DBL(to.y), FIXED2DBL(to.z));
-	FVector3 vecResult;
+	//DVector2 pfrom = Displacements.getOffset(from.portalgroup, to.portalgroup);
+	DVector3 vecFrom = from.pos;
+	DVector3 vecTo = to.pos;
+	DVector3 vecResult;
 	vecResult = vecTo - vecFrom;
 	vecResult *= scale;
 	vecResult = vecResult + vecFrom;
-	FVector3 delta = vecResult - vecTo;
+	DVector3 delta = vecResult - vecTo;
 
-	result.x = FLOAT2FIXED(vecResult.X);
-	result.y = FLOAT2FIXED(vecResult.Y);
-	result.z = FLOAT2FIXED(vecResult.Z);
+	result.pos = pmo->Vec3Offset(vecResult - to.pos);
+	//result.portalgroup = P_PointInSector(result.pos.x, result.pos.y)->PortalGroup;
 
 	// As a fail safe, assume extrapolation is the threshold.
 	return (delta.LengthSquared() > cl_predict_lerpthreshold && scale <= 1.00f);
@@ -2697,7 +2803,7 @@ void P_PredictPlayer (player_t *player)
 	PredictionPlayerBackup = *player;
 
 	APlayerPawn *act = player->mo;
-	memcpy(PredictionActorBackup, &act->x, sizeof(APlayerPawn) - ((BYTE *)&act->x - (BYTE *)act));
+	memcpy(PredictionActorBackup, &act->snext, sizeof(APlayerPawn) - ((BYTE *)&act->snext - (BYTE *)act));
 
 	act->flags &= ~MF_PICKUP;
 	act->flags2 &= ~MF2_PUSHWALL;
@@ -2769,16 +2875,15 @@ void P_PredictPlayer (player_t *player)
 		{
 			// Z is not compared as lifts will alter this with no apparent change
 			// Make lerping less picky by only testing whole units
-			DoLerp = ((PredictionLast.x >> 16) != (player->mo->x >> 16) ||
-				(PredictionLast.y >> 16) != (player->mo->y >> 16));
+			DoLerp = (int)PredictionLast.pos.X != (int)player->mo->X() || (int)PredictionLast.pos.Y != (int)player->mo->Y();
 
 			// Aditional Debug information
-			if (developer && DoLerp)
+			if (developer >= DMSG_NOTIFY && DoLerp)
 			{
-				DPrintf("Lerp! Ltic (%d) && Ptic (%d) | Lx (%d) && Px (%d) | Ly (%d) && Py (%d)\n",
+				DPrintf(DMSG_NOTIFY, "Lerp! Ltic (%d) && Ptic (%d) | Lx (%f) && Px (%f) | Ly (%f) && Py (%f)\n",
 					PredictionLast.gametic, i,
-					(PredictionLast.x >> 16), (player->mo->x >> 16),
-					(PredictionLast.y >> 16), (player->mo->y >> 16));
+					(PredictionLast.pos.X), (player->mo->X()),
+					(PredictionLast.pos.Y), (player->mo->Y()));
 			}
 		}
 	}
@@ -2796,19 +2901,16 @@ void P_PredictPlayer (player_t *player)
 		}
 
 		PredictionLast.gametic = maxtic - 1;
-		PredictionLast.x = player->mo->x;
-		PredictionLast.y = player->mo->y;
-		PredictionLast.z = player->mo->z;
+		PredictionLast.pos = player->mo->Pos();
+		//PredictionLast.portalgroup = player->mo->Sector->PortalGroup;
 
 		if (PredictionLerptics > 0)
 		{
 			if (PredictionLerpFrom.gametic > 0 &&
-				P_LerpCalculate(PredictionLerpFrom, PredictionLast, PredictionLerpResult, (float)PredictionLerptics * cl_predict_lerpscale))
+				P_LerpCalculate(player->mo, PredictionLerpFrom, PredictionLast, PredictionLerpResult, (float)PredictionLerptics * cl_predict_lerpscale))
 			{
 				PredictionLerptics++;
-				player->mo->x = PredictionLerpResult.x;
-				player->mo->y = PredictionLerpResult.y;
-				player->mo->z = PredictionLerpResult.z;
+				player->mo->SetXYZ(PredictionLerpResult.pos);
 			}
 			else
 			{
@@ -2817,8 +2919,6 @@ void P_PredictPlayer (player_t *player)
 		}
 	}
 }
-
-extern msecnode_t *P_AddSecnode (sector_t *s, AActor *thing, msecnode_t *nextnode);
 
 void P_UnPredictPlayer ()
 {
@@ -2839,8 +2939,9 @@ void P_UnPredictPlayer ()
 		// could cause it to change during prediction.
 		player->camera = savedcamera;
 
-		act->UnlinkFromWorld();
-		memcpy(&act->x, PredictionActorBackup, sizeof(APlayerPawn) - ((BYTE *)&act->x - (BYTE *)act));
+		FLinkContext ctx;
+		act->UnlinkFromWorld(&ctx);
+		memcpy(&act->snext, PredictionActorBackup, sizeof(APlayerPawn) - ((BYTE *)&act->snext - (BYTE *)act));
 
 		// The blockmap ordering needs to remain unchanged, too.
 		// Restore sector links and refrences.
@@ -2868,7 +2969,7 @@ void P_UnPredictPlayer ()
 			}
 
 			// Destroy old refrences
-			msecnode_t *node = sector_list;
+			msecnode_t *node = ctx.sector_list;
 			while (node)
 			{
 				node->m_thing = NULL;
@@ -2876,23 +2977,24 @@ void P_UnPredictPlayer ()
 			}
 
 			// Make the sector_list match the player's touching_sectorlist before it got predicted.
-			P_DelSeclist(sector_list);
-			sector_list = NULL;
+			P_DelSeclist(ctx.sector_list, &sector_t::touching_thinglist);
+			ctx.sector_list = NULL;
 			for (i = PredictionTouchingSectorsBackup.Size(); i-- > 0;)
 			{
-				sector_list = P_AddSecnode(PredictionTouchingSectorsBackup[i], act, sector_list);
+				ctx.sector_list = P_AddSecnode(PredictionTouchingSectorsBackup[i], act, ctx.sector_list, PredictionTouchingSectorsBackup[i]->touching_thinglist);
 			}
-			act->touching_sectorlist = sector_list;	// Attach to thing
-			sector_list = NULL;		// clear for next time
+			act->touching_sectorlist = ctx.sector_list;	// Attach to thing
+			ctx.sector_list = NULL;		// clear for next time
 
-			node = sector_list;
+			// Huh???
+			node = ctx.sector_list;
 			while (node)
 			{
 				if (node->m_thing == NULL)
 				{
-					if (node == sector_list)
-						sector_list = node->m_tnext;
-					node = P_DelSecnode(node);
+					if (node == ctx.sector_list)
+						ctx.sector_list = node->m_tnext;
+					node = P_DelSecnode(node, &sector_t::touching_thinglist);
 				}
 				else
 				{
@@ -2951,17 +3053,17 @@ void P_UnPredictPlayer ()
 	}
 }
 
-void player_t::Serialize (FArchive &arc)
+void player_t::Serialize(FSerializer &arc)
 {
-	int i;
 	FString skinname;
 
-	arc << cls
-		<< mo
-		<< camera
-		<< playerstate
-		<< cmd;
-	if (arc.IsLoading())
+	arc("class", cls)
+		("mo", mo)
+		("camera", camera)
+		("playerstate", playerstate)
+		("cmd", cmd);
+
+	if (arc.isReading())
 	{
 		ReadUserInfo(arc, userinfo, skinname);
 	}
@@ -2969,186 +3071,80 @@ void player_t::Serialize (FArchive &arc)
 	{
 		WriteUserInfo(arc, userinfo);
 	}
-	arc << DesiredFOV << FOV
-		<< viewz
-		<< viewheight
-		<< deltaviewheight
-		<< bob
-		<< velx
-		<< vely
-		<< centering
-		<< health
-		<< inventorytics;
-	if (SaveVersion < 4513)
-	{
-		bool backpack;
-		arc << backpack;
-	}
-	arc << fragcount
-		<< spreecount
-		<< multicount
-		<< lastkilltime
-		<< ReadyWeapon << PendingWeapon
-		<< cheats
-		<< refire
-		<< inconsistant
-		<< killcount
-		<< itemcount
-		<< secretcount
-		<< damagecount
-		<< bonuscount
-		<< hazardcount
-		<< poisoncount
-		<< poisoner
-		<< attacker
-		<< extralight
-		<< fixedcolormap << fixedlightlevel
-		<< morphTics
-		<< MorphedPlayerClass
-		<< MorphStyle
-		<< MorphExitFlash
-		<< PremorphWeapon
-		<< chickenPeck
-		<< jumpTics
-		<< respawn_time
-		<< air_finished
-		<< turnticks
-		<< oldbuttons;
-	if (SaveVersion >= 4929)
-	{
-		arc << hazardtype
-			<< hazardinterval;
-	}
-	bool IsBot = false;
-	if (SaveVersion >= 4514)
-	{
-		arc << Bot;
-	}
-	else
-	{
-		arc << IsBot;
-	}
-	arc << BlendR
-		<< BlendG
-		<< BlendB
-		<< BlendA;
-	if (SaveVersion < 3427)
-	{
-		WORD oldaccuracy, oldstamina;
-		arc << oldaccuracy << oldstamina;
-		if (mo != NULL)
-		{
-			mo->accuracy = oldaccuracy;
-			mo->stamina = oldstamina;
-		}
-	}
-	if (SaveVersion < 4041)
-	{
-		// Move weapon state flags from cheats and into WeaponState.
-		WeaponState = ((cheats >> 14) & 1) | ((cheats & (0x37 << 24)) >> (24 - 1));
-		cheats &= ~((1 << 14) | (0x37 << 24));
-	}
-	if (SaveVersion < 4527)
-	{
-		BYTE oldWeaponState;
-		arc << oldWeaponState;
-		WeaponState = oldWeaponState;
-	}
-	else
-	{
-		arc << WeaponState;
-	}
-	arc << LogText
-		<< ConversationNPC
-		<< ConversationPC
-		<< ConversationNPCAngle
-		<< ConversationFaceTalker;
 
-	for (i = 0; i < MAXPLAYERS; i++)
-		arc << frags[i];
-	for (i = 0; i < NUMPSPRITES; i++)
-		arc << psprites[i];
+	arc("desiredfov", DesiredFOV)
+		("fov", FOV)
+		("viewz", viewz)
+		("viewheight", viewheight)
+		("deltaviewheight", deltaviewheight)
+		("bob", bob)
+		("vel", Vel)
+		("centering", centering)
+		("health", health)
+		("inventorytics", inventorytics)
+		("fragcount", fragcount)
+		("spreecount", spreecount)
+		("multicount", multicount)
+		("lastkilltime", lastkilltime)
+		("readyweapon", ReadyWeapon)
+		("pendingweapon", PendingWeapon)
+		("cheats", cheats)
+		("refire", refire)
+		("inconsistant", inconsistant)
+		("killcount", killcount)
+		("itemcount", itemcount)
+		("secretcount", secretcount)
+		("damagecount", damagecount)
+		("bonuscount", bonuscount)
+		("hazardcount", hazardcount)
+		("poisoncount", poisoncount)
+		("poisoner", poisoner)
+		("attacker", attacker)
+		("extralight", extralight)
+		("fixedcolormap", fixedcolormap)
+		("fixedlightlevel", fixedlightlevel)
+		("morphTics", morphTics)
+		("morphedplayerclass", MorphedPlayerClass)
+		("morphstyle", MorphStyle)
+		("morphexitflash", MorphExitFlash)
+		("premorphweapon", PremorphWeapon)
+		("chickenpeck", chickenPeck)
+		("jumptics", jumpTics)
+		("respawntime", respawn_time)
+		("airfinished", air_finished)
+		("turnticks", turnticks)
+		("oldbuttons", oldbuttons)
+		("hazardtype", hazardtype)
+		("hazardinterval", hazardinterval)
+		("bot", Bot)
+		("blendr", BlendR)
+		("blendg", BlendG)
+		("blendb", BlendB)
+		("blenda", BlendA)
+		("weaponstate", WeaponState)
+		("logtext", LogText)
+		("conversionnpc", ConversationNPC)
+		("conversionpc", ConversationPC)
+		("conversionnpcangle", ConversationNPCAngle)
+		("conversionfacetalker", ConversationFaceTalker)
+		.Array("frags", frags, MAXPLAYERS)
+		("psprites", psprites)
+		("currentplayerclass", CurrentPlayerClass)
+		("crouchfactor", crouchfactor)
+		("crouching", crouching)
+		("crouchdir", crouchdir)
+		("crouchviewdelta", crouchviewdelta)
+		("original_cmd", original_cmd)
+		("original_oldbuttons", original_oldbuttons)
+		("poisontype", poisontype)
+		("poisonpaintype", poisonpaintype)
+		("timefreezer", timefreezer)
+		("settings_controller", settings_controller)
+		("onground", onground)
+		("musinfoactor", MUSINFOactor)
+		("musinfotics", MUSINFOtics);
 
-	arc << CurrentPlayerClass;
-
-	arc << crouchfactor
-		<< crouching 
-		<< crouchdir
-		<< crouchviewdelta
-		<< original_cmd
-		<< original_oldbuttons;
-
-	if (SaveVersion >= 3475)
-	{
-		arc << poisontype << poisonpaintype;
-	}
-	else if (poisoner != NULL)
-	{
-		poisontype = poisoner->DamageType;
-		poisonpaintype = poisoner->PainType != NAME_None ? poisoner->PainType : poisoner->DamageType;
-	}
-
-	if (SaveVersion >= 3599)
-	{
-		arc << timefreezer;
-	}
-	else
-	{
-		cheats &= ~(1 << 15);	// make sure old CF_TIMEFREEZE bit is cleared
-	}
-	if (SaveVersion < 3640)
-	{
-		cheats &= ~(1 << 17);	// make sure old CF_REGENERATION bit is cleared
-	}
-	if (SaveVersion >= 3780)
-	{
-		arc << settings_controller;
-	}
-	else
-	{
-		settings_controller = (this - players == Net_Arbitrator);
-	}
-	if (SaveVersion >= 4505)
-	{
-		arc << onground;
-	}
-	else
-	{
-		onground = (mo->z <= mo->floorz) || (mo->flags2 & MF2_ONMOBJ) || (mo->BounceFlags & BOUNCE_MBF) || (cheats & CF_NOCLIP2);
-	}
-
-	if (SaveVersion < 4514 && IsBot)
-	{
-		Bot = new DBot;
-
-		arc	<< Bot->angle
-			<< Bot->dest
-			<< Bot->prev
-			<< Bot->enemy
-			<< Bot->missile
-			<< Bot->mate
-			<< Bot->last_mate
-			<< Bot->skill
-			<< Bot->t_active
-			<< Bot->t_respawn
-			<< Bot->t_strafe
-			<< Bot->t_react
-			<< Bot->t_fight
-			<< Bot->t_roam
-			<< Bot->t_rocket
-			<< Bot->first_shot
-			<< Bot->sleft
-			<< Bot->allround
-			<< Bot->oldx
-			<< Bot->oldy;
-	}
-
-	if (SaveVersion < 4516 && Bot != NULL)
-	{
-		Bot->player = this;
-	}
-
-	if (arc.IsLoading ())
+	if (arc.isWriting ())
 	{
 		// If the player reloaded because they pressed +use after dying, we
 		// don't want +use to still be down after the game is loaded.
@@ -3159,59 +3155,6 @@ void player_t::Serialize (FArchive &arc)
 	{
 		userinfo.SkinChanged(skinname, CurrentPlayerClass);
 	}
-	if (SaveVersion >= 4522)
-	{
-		arc << MUSINFOactor << MUSINFOtics;
-	}
-}
-
-
-static FPlayerColorSetMap *GetPlayerColors(FName classname)
-{
-	const PClass *cls = PClass::FindClass(classname);
-
-	if (cls != NULL)
-	{
-		FActorInfo *inf = cls->ActorInfo;
-
-		if (inf != NULL)
-		{
-			return inf->ColorSets;
-		}
-	}
-	return NULL;
-}
-
-FPlayerColorSet *P_GetPlayerColorSet(FName classname, int setnum)
-{
-	FPlayerColorSetMap *map = GetPlayerColors(classname);
-	if (map == NULL)
-	{
-		return NULL;
-	}
-	return map->CheckKey(setnum);
-}
-
-static int STACK_ARGS intcmp(const void *a, const void *b)
-{
-	return *(const int *)a - *(const int *)b;
-}
-
-void P_EnumPlayerColorSets(FName classname, TArray<int> *out)
-{
-	out->Clear();
-	FPlayerColorSetMap *map = GetPlayerColors(classname);
-	if (map != NULL)
-	{
-		FPlayerColorSetMap::Iterator it(*map);
-		FPlayerColorSetMap::Pair *pair;
-
-		while (it.NextPair(pair))
-		{
-			out->Push(pair->Key);
-		}
-		qsort(&(*out)[0], out->Size(), sizeof(int), intcmp);
-	}
 }
 
 bool P_IsPlayerTotallyFrozen(const player_t *player)
@@ -3221,3 +3164,135 @@ bool P_IsPlayerTotallyFrozen(const player_t *player)
 		player->cheats & CF_TOTALLYFROZEN ||
 		((level.flags2 & LEVEL2_FROZEN) && player->timefreezer == 0);
 }
+
+
+//==========================================================================
+//
+// native members
+//
+//==========================================================================
+
+DEFINE_FIELD(APlayerPawn, crouchsprite)
+DEFINE_FIELD(APlayerPawn, MaxHealth)
+DEFINE_FIELD(APlayerPawn, MugShotMaxHealth)
+DEFINE_FIELD(APlayerPawn, RunHealth)
+DEFINE_FIELD(APlayerPawn, PlayerFlags)
+DEFINE_FIELD(APlayerPawn, InvFirst)
+DEFINE_FIELD(APlayerPawn, InvSel)
+DEFINE_FIELD(APlayerPawn, JumpZ)
+DEFINE_FIELD(APlayerPawn, GruntSpeed)
+DEFINE_FIELD(APlayerPawn, FallingScreamMinSpeed)
+DEFINE_FIELD(APlayerPawn, FallingScreamMaxSpeed)
+DEFINE_FIELD(APlayerPawn, ViewHeight)
+DEFINE_FIELD(APlayerPawn, ForwardMove1)
+DEFINE_FIELD(APlayerPawn, ForwardMove2)
+DEFINE_FIELD(APlayerPawn, SideMove1)
+DEFINE_FIELD(APlayerPawn, SideMove2)
+DEFINE_FIELD(APlayerPawn, ScoreIcon)
+DEFINE_FIELD(APlayerPawn, SpawnMask)
+DEFINE_FIELD(APlayerPawn, MorphWeapon)
+DEFINE_FIELD(APlayerPawn, AttackZOffset)
+DEFINE_FIELD(APlayerPawn, UseRange)
+DEFINE_FIELD(APlayerPawn, AirCapacity)
+DEFINE_FIELD(APlayerPawn, FlechetteType)
+DEFINE_FIELD(APlayerPawn, DamageFade)
+DEFINE_FIELD(APlayerPawn, ViewBob)
+
+DEFINE_FIELD(PClassPlayerPawn, HealingRadiusType)
+DEFINE_FIELD(PClassPlayerPawn, DisplayName)
+DEFINE_FIELD(PClassPlayerPawn, SoundClass)
+DEFINE_FIELD(PClassPlayerPawn, Face)
+DEFINE_FIELD(PClassPlayerPawn, Portrait)
+DEFINE_FIELD(PClassPlayerPawn, Slot)
+DEFINE_FIELD(PClassPlayerPawn, InvulMode)
+DEFINE_FIELD(PClassPlayerPawn, HexenArmor)
+DEFINE_FIELD(PClassPlayerPawn, ColorRangeStart)
+DEFINE_FIELD(PClassPlayerPawn, ColorRangeEnd)
+DEFINE_FIELD(PClassPlayerPawn, ColorSets)
+DEFINE_FIELD(PClassPlayerPawn, PainFlashes)
+
+DEFINE_FIELD_X(PlayerInfo, player_t, mo)
+DEFINE_FIELD_X(PlayerInfo, player_t, playerstate)
+DEFINE_FIELD_X(PlayerInfo, player_t, original_oldbuttons)
+DEFINE_FIELD_X(PlayerInfo, player_t, cls)
+DEFINE_FIELD_X(PlayerInfo, player_t, DesiredFOV)
+DEFINE_FIELD_X(PlayerInfo, player_t, FOV)
+DEFINE_FIELD_X(PlayerInfo, player_t, viewz)
+DEFINE_FIELD_X(PlayerInfo, player_t, viewheight)
+DEFINE_FIELD_X(PlayerInfo, player_t, deltaviewheight)
+DEFINE_FIELD_X(PlayerInfo, player_t, bob)
+DEFINE_FIELD_X(PlayerInfo, player_t, Vel)
+DEFINE_FIELD_X(PlayerInfo, player_t, centering)
+DEFINE_FIELD_X(PlayerInfo, player_t, turnticks)
+DEFINE_FIELD_X(PlayerInfo, player_t, attackdown)
+DEFINE_FIELD_X(PlayerInfo, player_t, usedown)
+DEFINE_FIELD_X(PlayerInfo, player_t, oldbuttons)
+DEFINE_FIELD_X(PlayerInfo, player_t, health)
+DEFINE_FIELD_X(PlayerInfo, player_t, inventorytics)
+DEFINE_FIELD_X(PlayerInfo, player_t, CurrentPlayerClass)
+DEFINE_FIELD_X(PlayerInfo, player_t, frags)
+DEFINE_FIELD_X(PlayerInfo, player_t, fragcount)
+DEFINE_FIELD_X(PlayerInfo, player_t, lastkilltime)
+DEFINE_FIELD_X(PlayerInfo, player_t, multicount)
+DEFINE_FIELD_X(PlayerInfo, player_t, spreecount)
+DEFINE_FIELD_X(PlayerInfo, player_t, WeaponState)
+DEFINE_FIELD_X(PlayerInfo, player_t, ReadyWeapon)
+DEFINE_FIELD_X(PlayerInfo, player_t, PendingWeapon)
+DEFINE_FIELD_X(PlayerInfo, player_t, psprites)
+DEFINE_FIELD_X(PlayerInfo, player_t, cheats)
+DEFINE_FIELD_X(PlayerInfo, player_t, timefreezer)
+DEFINE_FIELD_X(PlayerInfo, player_t, refire)
+DEFINE_FIELD_NAMED_X(PlayerInfo, player_t, inconsistant, inconsistent)
+DEFINE_FIELD_X(PlayerInfo, player_t, waiting)
+DEFINE_FIELD_X(PlayerInfo, player_t, killcount)
+DEFINE_FIELD_X(PlayerInfo, player_t, itemcount)
+DEFINE_FIELD_X(PlayerInfo, player_t, secretcount)
+DEFINE_FIELD_X(PlayerInfo, player_t, damagecount)
+DEFINE_FIELD_X(PlayerInfo, player_t, bonuscount)
+DEFINE_FIELD_X(PlayerInfo, player_t, hazardcount)
+DEFINE_FIELD_X(PlayerInfo, player_t, hazardinterval)
+DEFINE_FIELD_X(PlayerInfo, player_t, hazardtype)
+DEFINE_FIELD_X(PlayerInfo, player_t, poisoncount)
+DEFINE_FIELD_X(PlayerInfo, player_t, poisontype)
+DEFINE_FIELD_X(PlayerInfo, player_t, poisonpaintype)
+DEFINE_FIELD_X(PlayerInfo, player_t, poisoner)
+DEFINE_FIELD_X(PlayerInfo, player_t, attacker)
+DEFINE_FIELD_X(PlayerInfo, player_t, extralight)
+DEFINE_FIELD_X(PlayerInfo, player_t, fixedcolormap)
+DEFINE_FIELD_X(PlayerInfo, player_t, fixedlightlevel)
+DEFINE_FIELD_X(PlayerInfo, player_t, morphTics)
+DEFINE_FIELD_X(PlayerInfo, player_t, MorphedPlayerClass)
+DEFINE_FIELD_X(PlayerInfo, player_t, MorphStyle)
+DEFINE_FIELD_X(PlayerInfo, player_t, MorphExitFlash)
+DEFINE_FIELD_X(PlayerInfo, player_t, PremorphWeapon)
+DEFINE_FIELD_X(PlayerInfo, player_t, chickenPeck)
+DEFINE_FIELD_X(PlayerInfo, player_t, jumpTics)
+DEFINE_FIELD_X(PlayerInfo, player_t, onground)
+DEFINE_FIELD_X(PlayerInfo, player_t, respawn_time)
+DEFINE_FIELD_X(PlayerInfo, player_t, camera)
+DEFINE_FIELD_X(PlayerInfo, player_t, air_finished)
+DEFINE_FIELD_X(PlayerInfo, player_t, LastDamageType)
+DEFINE_FIELD_X(PlayerInfo, player_t, MUSINFOactor)
+DEFINE_FIELD_X(PlayerInfo, player_t, MUSINFOtics)
+DEFINE_FIELD_X(PlayerInfo, player_t, settings_controller)
+DEFINE_FIELD_X(PlayerInfo, player_t, crouching)
+DEFINE_FIELD_X(PlayerInfo, player_t, crouchdir)
+DEFINE_FIELD_X(PlayerInfo, player_t, Bot)
+DEFINE_FIELD_X(PlayerInfo, player_t, BlendR)
+DEFINE_FIELD_X(PlayerInfo, player_t, BlendG)
+DEFINE_FIELD_X(PlayerInfo, player_t, BlendB)
+DEFINE_FIELD_X(PlayerInfo, player_t, BlendA)
+DEFINE_FIELD_X(PlayerInfo, player_t, LogText)
+DEFINE_FIELD_X(PlayerInfo, player_t, MinPitch)
+DEFINE_FIELD_X(PlayerInfo, player_t, MaxPitch)
+DEFINE_FIELD_X(PlayerInfo, player_t, crouchfactor)
+DEFINE_FIELD_X(PlayerInfo, player_t, crouchoffset)
+DEFINE_FIELD_X(PlayerInfo, player_t, crouchviewdelta)
+DEFINE_FIELD_X(PlayerInfo, player_t, ConversationNPC)
+DEFINE_FIELD_X(PlayerInfo, player_t, ConversationPC)
+DEFINE_FIELD_X(PlayerInfo, player_t, ConversationNPCAngle)
+DEFINE_FIELD_X(PlayerInfo, player_t, ConversationFaceTalker)
+DEFINE_FIELD_X(PlayerInfo, player_t, cmd)
+DEFINE_FIELD_X(PlayerInfo, player_t, original_cmd)
+DEFINE_FIELD_X(PlayerInfo, player_t, userinfo)
+DEFINE_FIELD_X(PlayerInfo, player_t, weapons)

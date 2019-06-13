@@ -36,6 +36,9 @@ struct sfxinfo_t
 	// Next field is for use by the system sound interface.
 	// A non-null data means the sound has been loaded.
 	SoundHandle	data;
+    // Also for the sound interface. Used for 3D positional
+    // sounds, may be the same as data.
+    SoundHandle data3d;
 
 	FString		name;					// [RH] Sound name defined in SNDINFO
 	int 		lumpnum;				// lump number of sfx
@@ -102,7 +105,7 @@ public:
 	}
 	FSoundID(const FString &name)
 	{
-		ID = S_FindSound(name);
+		ID = S_FindSound(name.GetChars());
 	}
 	FSoundID(const FSoundID &other)
 	{
@@ -120,8 +123,16 @@ public:
 	}
 	FSoundID &operator=(const FString &name)
 	{
-		ID = S_FindSound(name);
+		ID = S_FindSound(name.GetChars());
 		return *this;
+	}
+	bool operator !=(FSoundID other) const
+	{
+		return ID != other.ID;
+	}
+	bool operator !=(int other) const
+	{
+		return ID != other;
 	}
 	operator int() const
 	{
@@ -164,8 +175,6 @@ public:
 		return FSoundID::operator=(name);
 	}
 };
-
-FArchive &operator<<(FArchive &arc, FSoundID &sid);
 
 extern FRolloffInfo S_Rolloff;
 extern BYTE *S_SoundCurve;
@@ -230,7 +239,10 @@ void S_Sound (AActor *ent, int channel, FSoundID sfxid, float volume, float atte
 void S_SoundMinMaxDist (AActor *ent, int channel, FSoundID sfxid, float volume, float mindist, float maxdist);
 void S_Sound (const FPolyObj *poly, int channel, FSoundID sfxid, float volume, float attenuation);
 void S_Sound (const sector_t *sec, int channel, FSoundID sfxid, float volume, float attenuation);
-void S_Sound (fixed_t x, fixed_t y, fixed_t z, int channel, FSoundID sfxid, float volume, float attenuation);
+void S_Sound(const DVector3 &pos, int channel, FSoundID sfxid, float volume, float attenuation);
+
+// [Nash] Used by ACS and DECORATE
+void S_PlaySound(AActor *a, int chan, FSoundID sid, float vol, float atten, bool local);
 
 // sound channels
 // channel 0 never willingly overrides
@@ -310,7 +322,7 @@ bool S_ChangeSoundVolume(AActor *actor, int channel, float volume);
 void S_RelinkSound (AActor *from, AActor *to);
 
 // Stores/retrieves playing channel information in an archive.
-void S_SerializeSounds(FArchive &arc);
+void S_SerializeSounds(FSerializer &arc);
 
 // Start music using <music_name>
 bool S_StartMusic (const char *music_name);
@@ -325,11 +337,10 @@ void S_RestartMusic ();
 
 void S_MIDIDeviceChanged();
 
-int S_GetMusic (char **name);
+int S_GetMusic (const char **name);
 
 // Stops the music for sure.
 void S_StopMusic (bool force);
-void S_UpdateMusic();
 
 // Stop and resume music, during game PAUSE.
 void S_PauseSound (bool notmusic, bool notsfx);
@@ -376,9 +387,6 @@ void S_NoiseDebug ();
 
 extern ReverbContainer *Environments;
 extern ReverbContainer *DefaultEnvironments[26];
-
-class FArchive;
-FArchive &operator<< (FArchive &arc, ReverbContainer *&env);
 
 void S_SetEnvironment (const ReverbContainer *settings);
 ReverbContainer *S_FindEnvironment (const char *name);

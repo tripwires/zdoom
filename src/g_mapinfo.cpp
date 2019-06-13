@@ -45,7 +45,6 @@
 #include "i_system.h"
 #include "gi.h"
 #include "gstrings.h"
-#include "farchive.h"
 #include "p_acs.h"
 #include "doomstat.h"
 #include "d_player.h"
@@ -196,7 +195,7 @@ void G_ClearSnapshots (void)
 {
 	for (unsigned int i = 0; i < wadlevelinfos.Size(); i++)
 	{
-		wadlevelinfos[i].ClearSnapshot();
+		wadlevelinfos[i].Snapshot.Clean();
 	}
 	// Since strings are only locked when snapshotting a level, unlock them
 	// all now, since we got rid of all the snapshots that cared about them.
@@ -240,6 +239,7 @@ void level_info_t::Reset()
 		flags2 = 0;
 	else
 		flags2 = LEVEL2_LAXMONSTERACTIVATION;
+	flags3 = 0;
 	Music = "";
 	LevelName = "";
 	FadeTable = "COLORMAP";
@@ -247,9 +247,8 @@ void level_info_t::Reset()
 	WallVertLight = +8;
 	F1Pic = "";
 	musicorder = 0;
-	snapshot = NULL;
-	snapshotVer = 0;
-	defered = 0;
+	Snapshot = { 0,0,0,0,0,nullptr };
+	deferred.Clear();
 	skyspeed1 = skyspeed2 = 0.f;
 	fadeto = 0;
 	outsidefog = 0xff000000;
@@ -338,44 +337,16 @@ FString level_info_t::LookupLevelName()
 //
 //==========================================================================
 
-void level_info_t::ClearSnapshot()
-{
-	if (snapshot != NULL) delete snapshot;
-	snapshot = NULL;
-}
-
-//==========================================================================
-//
-//
-//==========================================================================
-
-void level_info_t::ClearDefered()
-{
-	acsdefered_t *def = defered;
-	while (def)
-	{
-		acsdefered_t *next = def->next;
-		delete def;
-		def = next;
-	}
-	defered = NULL;
-}
-
-//==========================================================================
-//
-//
-//==========================================================================
-
 level_info_t *level_info_t::CheckLevelRedirect ()
 {
 	if (RedirectType != NAME_None)
 	{
-		const PClass *type = PClass::FindClass(RedirectType);
+		PClassActor *type = PClass::FindActor(RedirectType);
 		if (type != NULL)
 		{
 			for (int i = 0; i < MAXPLAYERS; ++i)
 			{
-				if (playeringame[i] && players[i].mo->FindInventory (type))
+				if (playeringame[i] && players[i].mo->FindInventory(type))
 				{
 					// check for actual presence of the map.
 					if (P_CheckMapData(RedirectMapName))
@@ -889,14 +860,14 @@ DEFINE_MAP_OPTION(fade, true)
 {
 	parse.ParseAssign();
 	parse.sc.MustGetString();
-	info->fadeto = V_GetColor(NULL, parse.sc.String);
+	info->fadeto = V_GetColor(NULL, parse.sc);
 }
 
 DEFINE_MAP_OPTION(outsidefog, true)
 {
 	parse.ParseAssign();
 	parse.sc.MustGetString();
-	info->outsidefog = V_GetColor(NULL, parse.sc.String);
+	info->outsidefog = V_GetColor(NULL, parse.sc);
 }
 
 DEFINE_MAP_OPTION(titlepatch, true)
@@ -988,14 +959,14 @@ DEFINE_MAP_OPTION(gravity, true)
 {
 	parse.ParseAssign();
 	parse.sc.MustGetFloat();
-	info->gravity = float(parse.sc.Float);
+	info->gravity = parse.sc.Float;
 }
 
 DEFINE_MAP_OPTION(aircontrol, true)
 {
 	parse.ParseAssign();
 	parse.sc.MustGetFloat();
-	info->aircontrol = float(parse.sc.Float);
+	info->aircontrol = parse.sc.Float;
 }
 
 DEFINE_MAP_OPTION(airsupply, true)
@@ -1082,6 +1053,18 @@ DEFINE_MAP_OPTION(PrecacheTextures, true)
 	} while (parse.sc.CheckString(","));
 }
 
+DEFINE_MAP_OPTION(PrecacheClasses, true)
+{
+	parse.ParseAssign();
+
+	do
+	{
+		parse.sc.MustGetString();
+		//the class list is not initialized here so all we can do is store the class's name.
+		info->PrecacheClasses.Push(parse.sc.String);
+	} while (parse.sc.CheckString(","));
+}
+
 DEFINE_MAP_OPTION(redirect, true)
 {
 	parse.ParseAssign();
@@ -1149,7 +1132,7 @@ DEFINE_MAP_OPTION(teamdamage, true)
 {
 	parse.ParseAssign();
 	parse.sc.MustGetFloat();
-	info->teamdamage = float(parse.sc.Float);
+	info->teamdamage = parse.sc.Float;
 }
 
 DEFINE_MAP_OPTION(mapbackground, true)
@@ -1327,6 +1310,9 @@ MapFlagHandlers[] =
 	{ "compat_floormove",				MITYPE_COMPATFLAG, 0, COMPATF2_FLOORMOVE },
 	{ "compat_soundcutoff",				MITYPE_COMPATFLAG, 0, COMPATF2_SOUNDCUTOFF },
 	{ "compat_pointonline",				MITYPE_COMPATFLAG, 0, COMPATF2_POINTONLINE },
+	{ "compat_multiexit",				MITYPE_COMPATFLAG, 0, COMPATF2_MULTIEXIT },
+	{ "compat_teleport",				MITYPE_COMPATFLAG, 0, COMPATF2_TELEPORT },
+	{ "compat_pushwindow",				MITYPE_COMPATFLAG, 0, COMPATF2_PUSHWINDOW },
 	{ "cd_start_track",					MITYPE_EATNEXT,	0, 0 },
 	{ "cd_end1_track",					MITYPE_EATNEXT,	0, 0 },
 	{ "cd_end2_track",					MITYPE_EATNEXT,	0, 0 },
@@ -1522,10 +1508,18 @@ level_info_t *FMapInfoParser::ParseMapHeader(level_info_t &defaultinfo)
 
 	if (sc.CheckNumber())
 	{	// MAPNAME is a number; assume a Hexen wad
-		char maptemp[8];
-		mysnprintf (maptemp, countof(maptemp), "MAP%02d", sc.Number);
-		mapname = maptemp;
-		HexenHack = true;
+		if (format_type == FMT_New)
+		{
+			mapname = sc.String;
+		}
+		else
+		{
+			char maptemp[8];
+			mysnprintf(maptemp, countof(maptemp), "MAP%02d", sc.Number);
+			mapname = maptemp;
+			HexenHack = true;
+			format_type = FMT_Old;
+		}
 	}
 	else 
 	{
@@ -1885,6 +1879,18 @@ void FMapInfoParser::ParseMapInfo (int lump, level_info_t &gamedefaults, level_i
 			else
 			{
 				sc.ScriptError("doomednums definitions not supported with old MAPINFO syntax");
+			}
+		}
+		else if (sc.Compare("damagetype"))
+		{
+			if (format_type != FMT_Old)
+			{
+				format_type = FMT_New;
+				ParseDamageDefinition();
+			}
+			else
+			{
+				sc.ScriptError("damagetype definitions not supported with old MAPINFO syntax");
 			}
 		}
 		else if (sc.Compare("spawnnums"))

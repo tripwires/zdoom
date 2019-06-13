@@ -50,6 +50,7 @@
 #include "m_joy.h"
 #include "gi.h"
 #include "i_sound.h"
+#include "cmdlib.h"
 
 #include "optionmenuitems.h"
 
@@ -60,6 +61,7 @@ static FListMenuDescriptor DefaultListMenuSettings;	// contains common settings 
 static FOptionMenuDescriptor DefaultOptionMenuSettings;	// contains common settings for all Option menus
 FOptionMenuSettings OptionSettings;
 FOptionMap OptionValues;
+bool mustPrintErrors;
 
 void I_BuildALDeviceList(FOptionValues *opt);
 
@@ -99,7 +101,7 @@ static FTextureID GetMenuTexture(const char* const name)
 {
 	const FTextureID texture = TexMan.CheckForTexture(name, FTexture::TEX_MiscPatch);
 
-	if (!texture.Exists())
+	if (!texture.Exists() && mustPrintErrors)
 	{
 		Printf("Missing menu texture: \"%s\"\n", name);
 	}
@@ -305,7 +307,15 @@ static void ParseListMenuBody(FScanner &sc, FListMenuDescriptor *desc)
 			int y = sc.Number;
 			sc.MustGetStringName(",");
 			sc.MustGetString();
-			FListMenuItem *it = new FListMenuItemStaticText(x, y, sc.String, desc->mFont, desc->mFontColor, centered);
+			FString label = sc.String;
+			EColorRange cr = desc->mFontColor;
+			if (sc.CheckString(","))
+			{
+				sc.MustGetString();
+				cr = V_FindFontColor(sc.String);
+				if (cr == CR_UNTRANSLATED && !sc.Compare("untranslated")) cr = desc->mFontColor;
+			}
+			FListMenuItem *it = new FListMenuItemStaticText(x, y, label, desc->mFont, cr, centered);
 			desc->mItems.Push(it);
 		}
 		else if (sc.Compare("PatchItem"))
@@ -390,10 +400,10 @@ static void ParseListMenuBody(FScanner &sc, FListMenuDescriptor *desc)
 			int y = sc.Number;
 			sc.MustGetStringName(",");
 			sc.MustGetString();
-			PalEntry c1 = V_GetColor(NULL, sc.String);
+			PalEntry c1 = V_GetColor(NULL, sc);
 			sc.MustGetStringName(",");
 			sc.MustGetString();
-			PalEntry c2 = V_GetColor(NULL, sc.String);
+			PalEntry c2 = V_GetColor(NULL, sc);
 			if (sc.CheckString(","))
 			{
 				sc.MustGetNumber();
@@ -647,6 +657,21 @@ static void ParseOptionSettings(FScanner &sc)
 //
 //=============================================================================
 
+static EColorRange ParseOptionColor(FScanner &sc, FOptionMenuDescriptor *desc)
+{
+	EColorRange cr = OptionSettings.mFontColor;
+	if (sc.CheckString(","))
+	{
+		sc.MustGetString();
+		cr = V_FindFontColor(sc.String);
+		if (cr == CR_UNTRANSLATED && !sc.Compare("untranslated") && isdigit(sc.String[0]))
+		{
+			if (strtol(sc.String, NULL, 0)) cr = OptionSettings.mFontColorHeader;
+		}
+	}
+	return cr;
+}
+
 static void ParseOptionMenuBody(FScanner &sc, FOptionMenuDescriptor *desc)
 {
 	sc.MustGetStringName("{");
@@ -757,7 +782,15 @@ static void ParseOptionMenuBody(FScanner &sc, FOptionMenuDescriptor *desc)
 			FString label = sc.String;
 			sc.MustGetStringName(",");
 			sc.MustGetString();
-			FOptionMenuItem *it = new FOptionMenuItemSafeCommand(label, sc.String);
+			FString command = sc.String;
+			FString prompt;
+			// Check for optional custom prompt
+			if (sc.CheckString(","))
+			{
+				sc.MustGetString();
+				prompt = sc.String;
+			}
+			FOptionMenuItem *it = new FOptionMenuItemSafeCommand(label, command, prompt);
 			desc->mItems.Push(it);
 		}
 		else if (sc.Compare("Control") || sc.Compare("MapControl"))
@@ -783,12 +816,7 @@ static void ParseOptionMenuBody(FScanner &sc, FOptionMenuDescriptor *desc)
 		{
 			sc.MustGetString();
 			FString label = sc.String;
-			bool cr = false;
-			if (sc.CheckString(","))
-			{
-				sc.MustGetNumber();
-				cr = !!sc.Number;
-			}
+			EColorRange cr = ParseOptionColor(sc, desc);
 			FOptionMenuItem *it = new FOptionMenuItemStaticText(label, cr);
 			desc->mItems.Push(it);
 		}
@@ -802,12 +830,7 @@ static void ParseOptionMenuBody(FScanner &sc, FOptionMenuDescriptor *desc)
 			sc.MustGetStringName(",");
 			sc.MustGetString();
 			FName action = sc.String;
-			bool cr = false;
-			if (sc.CheckString(","))
-			{
-				sc.MustGetNumber();
-				cr = !!sc.Number;
-			}
+			EColorRange cr = ParseOptionColor(sc, desc);
 			FOptionMenuItem *it = new FOptionMenuItemStaticTextSwitchable(label, label2, action, cr);
 			desc->mItems.Push(it);
 		}
@@ -956,10 +979,14 @@ void M_ParseMenuDefs()
 
 	atterm(	DeinitMenus);
 	DeinitMenus();
+
+	int IWADMenu = Wads.CheckNumForName("MENUDEF", ns_global, FWadCollection::IWAD_FILENUM);
+
 	while ((lump = Wads.FindLump ("MENUDEF", &lastlump)) != -1)
 	{
 		FScanner sc(lump);
 
+		mustPrintErrors = lump >= IWADMenu;
 		sc.SetCMode(true);
 		while (sc.GetString())
 		{

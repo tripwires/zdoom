@@ -64,8 +64,7 @@ void M_DrawConText (int color, int x, int y, const char *str)
 		TAG_DONE);
 }
 
-
-IMPLEMENT_CLASS(DOptionMenu)
+IMPLEMENT_CLASS(DOptionMenu, false, false)
 
 //=============================================================================
 //
@@ -274,7 +273,14 @@ bool DOptionMenu::MenuEvent (int mkey, bool fromcontroller)
 				mDesc->mSelectedItem = mDesc->mScrollTop + mDesc->mScrollPos + 1;
 				while (!mDesc->mItems[mDesc->mSelectedItem]->Selectable())
 				{
-					++mDesc->mSelectedItem;
+					if (++mDesc->mSelectedItem >= (int)mDesc->mItems.Size())
+					{
+						mDesc->mSelectedItem = 0;
+					}
+				}
+				if (mDesc->mScrollPos > mDesc->mSelectedItem)
+				{
+					mDesc->mScrollPos = mDesc->mSelectedItem;
 				}
 			}
 		}
@@ -294,7 +300,14 @@ bool DOptionMenu::MenuEvent (int mkey, bool fromcontroller)
 				mDesc->mSelectedItem = mDesc->mScrollTop + mDesc->mScrollPos;
 				while (!mDesc->mItems[mDesc->mSelectedItem]->Selectable())
 				{
-					++mDesc->mSelectedItem;
+					if (++mDesc->mSelectedItem >= (int)mDesc->mItems.Size())
+					{
+						mDesc->mSelectedItem = 0;
+					}
+				}
+				if (mDesc->mScrollPos > mDesc->mSelectedItem)
+				{
+					mDesc->mScrollPos = mDesc->mSelectedItem;
 				}
 			}
 		}
@@ -465,7 +478,6 @@ void DOptionMenu::Drawer ()
 
 FOptionMenuItem::~FOptionMenuItem()
 {
-	if (mLabel != NULL) delete [] mLabel;
 }
 
 int FOptionMenuItem::Draw(FOptionMenuDescriptor *desc, int y, int indent, bool selected)
@@ -493,14 +505,14 @@ int  FOptionMenuItem::GetIndent()
 	{
 		return 0;
 	}
-	const char *label = mLabel;
+	const char *label = mLabel.GetChars();
 	if (*label == '$') label = GStrings(label+1);
 	return SmallFont->StringWidth(label);
 }
 
 void FOptionMenuItem::drawLabel(int indent, int y, EColorRange color, bool grayed)
 {
-	const char *label = mLabel;
+	const char *label = mLabel.GetChars();
 	if (*label == '$') label = GStrings(label+1);
 
 	int overlay = grayed? MAKEARGB(96,48,0,0) : 0;
@@ -566,7 +578,7 @@ public:
 	}
 };
 
-IMPLEMENT_CLASS(DGameplayMenu)
+IMPLEMENT_CLASS(DGameplayMenu, false, false)
 
 class DCompatibilityMenu : public DOptionMenu
 {
@@ -588,4 +600,4 @@ public:
 	}
 };
 
-IMPLEMENT_CLASS(DCompatibilityMenu)
+IMPLEMENT_CLASS(DCompatibilityMenu, false, false)

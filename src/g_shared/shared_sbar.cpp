@@ -51,21 +51,24 @@
 #include "colormatcher.h"
 #include "v_palette.h"
 #include "d_player.h"
-#include "farchive.h"
-#include "a_hexenglobal.h"
+#include "serializer.h"
 #include "gstrings.h"
+#include "r_utility.h"
+#include "cmdlib.h"
 
 #include "../version.h"
 
-#define XHAIRSHRINKSIZE		(FRACUNIT/18)
-#define XHAIRPICKUPSIZE		(FRACUNIT*2+XHAIRSHRINKSIZE)
+#define XHAIRSHRINKSIZE		(1./18)
+#define XHAIRPICKUPSIZE		(2+XHAIRSHRINKSIZE)
 #define POWERUPICONSIZE		32
 
-IMPLEMENT_POINTY_CLASS(DBaseStatusBar)
-	DECLARE_POINTER(Messages[0])
-	DECLARE_POINTER(Messages[1])
-	DECLARE_POINTER(Messages[2])
-END_POINTERS
+IMPLEMENT_CLASS(DBaseStatusBar, false, true)
+
+IMPLEMENT_POINTERS_START(DBaseStatusBar)
+	IMPLEMENT_POINTER(Messages[0])
+	IMPLEMENT_POINTER(Messages[1])
+	IMPLEMENT_POINTER(Messages[2])
+IMPLEMENT_POINTERS_END
 
 EXTERN_CVAR (Bool, am_showmonsters)
 EXTERN_CVAR (Bool, am_showsecrets)
@@ -74,6 +77,8 @@ EXTERN_CVAR (Bool, am_showtime)
 EXTERN_CVAR (Bool, am_showtotaltime)
 EXTERN_CVAR (Bool, noisedebug)
 EXTERN_CVAR (Int, con_scaletext)
+
+int active_con_scaletext();
 
 DBaseStatusBar *StatusBar;
 
@@ -109,7 +114,7 @@ CVAR (Int, crosshair, 0, CVAR_ARCHIVE)
 CVAR (Bool, crosshairforce, false, CVAR_ARCHIVE)
 CVAR (Color, crosshaircolor, 0xff0000, CVAR_ARCHIVE);
 CVAR (Bool, crosshairhealth, true, CVAR_ARCHIVE);
-CVAR (Bool, crosshairscale, false, CVAR_ARCHIVE);
+CVAR (Float, crosshairscale, 1.0, CVAR_ARCHIVE);
 CVAR (Bool, crosshairgrow, false, CVAR_ARCHIVE);
 CUSTOM_CVAR(Int, am_showmaplabel, 2, CVAR_ARCHIVE)
 {
@@ -117,6 +122,7 @@ CUSTOM_CVAR(Int, am_showmaplabel, 2, CVAR_ARCHIVE)
 }
 
 CVAR (Bool, idmypos, false, 0);
+CVAR(Float, underwater_fade_scalar, 1.0f, CVAR_ARCHIVE) // [Nash] user-settable underwater blend intensity
 
 //---------------------------------------------------------------------------
 //
@@ -233,7 +239,7 @@ DBaseStatusBar::DBaseStatusBar (int reltop, int hres, int vres)
 	CompleteBorder = false;
 	Centering = false;
 	FixedOrigin = false;
-	CrosshairSize = FRACUNIT;
+	CrosshairSize = 1.;
 	RelTop = reltop;
 	memset(Messages, 0, sizeof(Messages));
 	Displacement = 0;
@@ -253,7 +259,7 @@ DBaseStatusBar::DBaseStatusBar (int reltop, int hres, int vres)
 
 void DBaseStatusBar::Destroy ()
 {
-	for (unsigned int i = 0; i < countof(Messages); ++i)
+	for (size_t i = 0; i < countof(Messages); ++i)
 	{
 		DHUDMessage *msg = Messages[i];
 		while (msg)
@@ -287,7 +293,7 @@ void DBaseStatusBar::SetScaled (bool scale, bool force)
 		::ST_Y = ST_Y;
 		if (RelTop > 0)
 		{
-			Displacement = ((ST_Y * VirticalResolution / SCREENHEIGHT) - (VirticalResolution - RelTop))*FRACUNIT/RelTop;
+			Displacement = double((ST_Y * VirticalResolution / SCREENHEIGHT) - (VirticalResolution - RelTop))/RelTop;
 		}
 		else
 		{
@@ -298,14 +304,15 @@ void DBaseStatusBar::SetScaled (bool scale, bool force)
 	{
 		ST_X = 0;
 		ST_Y = VirticalResolution - RelTop;
-		if (CheckRatio(SCREENWIDTH, SCREENHEIGHT) != 4)
+		float aspect = ActiveRatio(SCREENWIDTH, SCREENHEIGHT);
+		if (!AspectTallerThanWide(aspect))
 		{ // Normal resolution
 			::ST_Y = Scale (ST_Y, SCREENHEIGHT, VirticalResolution);
 		}
 		else
 		{ // 5:4 resolution
-			::ST_Y = Scale(ST_Y - VirticalResolution/2, SCREENHEIGHT*3, Scale(VirticalResolution, BaseRatioSizes[4][1], 200)) + SCREENHEIGHT/2
-				+ (SCREENHEIGHT - SCREENHEIGHT * BaseRatioSizes[4][3] / 48) / 2;
+			::ST_Y = Scale(ST_Y - VirticalResolution/2, SCREENHEIGHT*3, Scale(VirticalResolution, AspectBaseHeight(aspect), 200)) + SCREENHEIGHT/2
+				+ (SCREENHEIGHT - SCREENHEIGHT * AspectMultiplier(aspect) / 48) / 2;
 		}
 		Displacement = 0;
 	}
@@ -355,7 +362,7 @@ void DBaseStatusBar::MultiplayerChanged ()
 
 void DBaseStatusBar::Tick ()
 {
-	for (unsigned int i = 0; i < countof(Messages); ++i)
+	for (size_t i = 0; i < countof(Messages); ++i)
 	{
 		DHUDMessage *msg = Messages[i];
 		DHUDMessage **prev = &Messages[i];
@@ -377,12 +384,12 @@ void DBaseStatusBar::Tick ()
 		}
 
 		// If the crosshair has been enlarged, shrink it.
-		if (CrosshairSize > FRACUNIT)
+		if (CrosshairSize > 1.)
 		{
 			CrosshairSize -= XHAIRSHRINKSIZE;
-			if (CrosshairSize < FRACUNIT)
+			if (CrosshairSize < 1.)
 			{
-				CrosshairSize = FRACUNIT;
+				CrosshairSize = 1.;
 			}
 		}
 	}
@@ -437,7 +444,7 @@ void DBaseStatusBar::AttachMessage (DHUDMessage *msg, DWORD id, int layer)
 
 DHUDMessage *DBaseStatusBar::DetachMessage (DHUDMessage *msg)
 {
-	for (unsigned int i = 0; i < countof(Messages); ++i)
+	for (size_t i = 0; i < countof(Messages); ++i)
 	{
 		DHUDMessage *probe = Messages[i];
 		DHUDMessage **prev = &Messages[i];
@@ -464,7 +471,7 @@ DHUDMessage *DBaseStatusBar::DetachMessage (DHUDMessage *msg)
 
 DHUDMessage *DBaseStatusBar::DetachMessage (DWORD id)
 {
-	for (unsigned int i = 0; i < countof(Messages); ++i)
+	for (size_t i = 0; i < countof(Messages); ++i)
 	{
 		DHUDMessage *probe = Messages[i];
 		DHUDMessage **prev = &Messages[i];
@@ -497,7 +504,7 @@ DHUDMessage *DBaseStatusBar::DetachMessage (DWORD id)
 
 void DBaseStatusBar::DetachAllMessages ()
 {
-	for (unsigned int i = 0; i < countof(Messages); ++i)
+	for (size_t i = 0; i < countof(Messages); ++i)
 	{
 		DHUDMessage *probe = Messages[i];
 
@@ -562,27 +569,6 @@ void DBaseStatusBar::DrawDimImage (FTexture *img,
 	{
 		screen->DrawTexture (img, x + ST_X, y + ST_Y,
 			DTA_ColorOverlay, dimmed ? DIM_OVERLAY : 0,
-			DTA_Bottom320x200, Scaled,
-			TAG_DONE);
-	}
-}
-
-//---------------------------------------------------------------------------
-//
-// PROC DrawImage
-//
-// Draws a translucent image with the status bar's upper-left corner as the
-// origin.
-//
-//---------------------------------------------------------------------------
-
-void DBaseStatusBar::DrawFadedImage (FTexture *img,
-	int x, int y, fixed_t shade) const
-{
-	if (img != NULL)
-	{
-		screen->DrawTexture (img, x + ST_X, y + ST_Y,
-			DTA_Alpha, shade,
 			DTA_Bottom320x200, Scaled,
 			TAG_DONE);
 	}
@@ -762,7 +748,7 @@ void DBaseStatusBar::DrINumberOuter (signed int val, int x, int y, bool center, 
 	else if (val == 0)
 	{
 		screen->DrawTexture (Images[imgINumbers], x + 1, y + 1,
-			DTA_FillColor, 0, DTA_Alpha, HR_SHADOW,
+			DTA_FillColor, 0, DTA_AlphaF, HR_SHADOW,
 			DTA_HUDRules, center ? HUD_HorizCenter : HUD_Normal, TAG_DONE);
 		screen->DrawTexture (Images[imgINumbers], x, y,
 			DTA_HUDRules, center ? HUD_HorizCenter : HUD_Normal, TAG_DONE);
@@ -776,7 +762,7 @@ void DBaseStatusBar::DrINumberOuter (signed int val, int x, int y, bool center, 
 	while (val != 0)
 	{
 		screen->DrawTexture (Images[imgINumbers + val % 10], x + 1, y + 1,
-			DTA_FillColor, 0, DTA_Alpha, HR_SHADOW,
+			DTA_FillColor, 0, DTA_AlphaF, HR_SHADOW,
 			DTA_HUDRules, center ? HUD_HorizCenter : HUD_Normal, TAG_DONE);
 		x -= w;
 		val /= 10;
@@ -784,7 +770,7 @@ void DBaseStatusBar::DrINumberOuter (signed int val, int x, int y, bool center, 
 	if (negative)
 	{
 		screen->DrawTexture (Images[imgNEGATIVE], x + 1, y + 1,
-			DTA_FillColor, 0, DTA_Alpha, HR_SHADOW,
+			DTA_FillColor, 0, DTA_AlphaF, HR_SHADOW,
 			DTA_HUDRules, center ? HUD_HorizCenter : HUD_Normal, TAG_DONE);
 	}
 
@@ -839,7 +825,7 @@ void DBaseStatusBar::DrBNumberOuter (signed int val, int x, int y, int size) con
 		{
 			screen->DrawTexture (pic, xpos - pic->GetWidth()/2 + 2, y + 2,
 				DTA_HUDRules, HUD_Normal,
-				DTA_Alpha, HR_SHADOW,
+				DTA_AlphaF, HR_SHADOW,
 				DTA_FillColor, 0,
 				TAG_DONE);
 			screen->DrawTexture (pic, xpos - pic->GetWidth()/2, y,
@@ -865,7 +851,7 @@ void DBaseStatusBar::DrBNumberOuter (signed int val, int x, int y, int size) con
 		{
 			screen->DrawTexture (pic, xpos - pic->GetWidth()/2 + 2, y + 2,
 				DTA_HUDRules, HUD_Normal,
-				DTA_Alpha, HR_SHADOW,
+				DTA_AlphaF, HR_SHADOW,
 				DTA_FillColor, 0,
 				TAG_DONE);
 		}
@@ -879,7 +865,7 @@ void DBaseStatusBar::DrBNumberOuter (signed int val, int x, int y, int size) con
 		{
 			screen->DrawTexture (pic, xpos - pic->GetWidth()/2 + 2, y + 2,
 				DTA_HUDRules, HUD_Normal,
-				DTA_Alpha, HR_SHADOW,
+				DTA_AlphaF, HR_SHADOW,
 				DTA_FillColor, 0,
 				TAG_DONE);
 		}
@@ -941,7 +927,7 @@ void DBaseStatusBar::DrBNumberOuterFont (signed int val, int x, int y, int size)
 		pic = BigFont->GetChar ('0', &v);
 		screen->DrawTexture (pic, xpos - v/2 + 2, y + 2,
 			DTA_HUDRules, HUD_Normal,
-			DTA_Alpha, HR_SHADOW,
+			DTA_AlphaF, HR_SHADOW,
 			DTA_FillColor, 0,
 			DTA_Translation, BigFont->GetColorTranslation (CR_UNTRANSLATED),
 			TAG_DONE);
@@ -966,7 +952,7 @@ void DBaseStatusBar::DrBNumberOuterFont (signed int val, int x, int y, int size)
 		pic = BigFont->GetChar ('0' + val % 10, &v);
 		screen->DrawTexture (pic, xpos - v/2 + 2, y + 2,
 			DTA_HUDRules, HUD_Normal,
-			DTA_Alpha, HR_SHADOW,
+			DTA_AlphaF, HR_SHADOW,
 			DTA_FillColor, 0,
 			DTA_Translation, BigFont->GetColorTranslation (CR_UNTRANSLATED),
 			TAG_DONE);
@@ -980,7 +966,7 @@ void DBaseStatusBar::DrBNumberOuterFont (signed int val, int x, int y, int size)
 		{
 			screen->DrawTexture (pic, xpos - v/2 + 2, y + 2,
 				DTA_HUDRules, HUD_Normal,
-				DTA_Alpha, HR_SHADOW,
+				DTA_AlphaF, HR_SHADOW,
 				DTA_FillColor, 0,
 				DTA_Translation, BigFont->GetColorTranslation (CR_UNTRANSLATED),
 				TAG_DONE);
@@ -1055,10 +1041,10 @@ void DBaseStatusBar::DrSmallNumberOuter (int val, int x, int y, bool center) con
 
 void DBaseStatusBar::RefreshBackground () const
 {
-	int x, x2, y, ratio;
+	int x, x2, y;
 
-	ratio = CheckRatio (SCREENWIDTH, SCREENHEIGHT);
-	x = (!(ratio & 3) || !Scaled) ? ST_X : SCREENWIDTH*(48-BaseRatioSizes[ratio][3])/(48*2);
+	float ratio = ActiveRatio (SCREENWIDTH, SCREENHEIGHT);
+	x = (ratio < 1.5f || !Scaled) ? ST_X : SCREENWIDTH*(48-AspectMultiplier(ratio))/(48*2);
 	y = x == ST_X && x > 0 ? ST_Y : ::ST_Y;
 
 	if(!CompleteBorder)
@@ -1078,8 +1064,8 @@ void DBaseStatusBar::RefreshBackground () const
 	{
 		if(!CompleteBorder)
 		{
-			x2 = !(ratio & 3) || !Scaled ? ST_X+HorizontalResolution :
-				SCREENWIDTH - (SCREENWIDTH*(48-BaseRatioSizes[ratio][3])+48*2-1)/(48*2);
+			x2 = ratio < 1.5f || !Scaled ? ST_X+HorizontalResolution :
+				SCREENWIDTH - (SCREENWIDTH*(48-AspectMultiplier(ratio))+48*2-1)/(48*2);
 		}
 		else
 		{
@@ -1113,7 +1099,7 @@ void DBaseStatusBar::DrawCrosshair ()
 	static int palettecolor = 0;
 
 	DWORD color;
-	fixed_t size;
+	double size;
 	int w, h;
 
 	// Don't draw the crosshair in chasecam mode
@@ -1128,21 +1114,21 @@ void DBaseStatusBar::DrawCrosshair ()
 		return;
 	}
 
-	if (crosshairscale)
+	if (crosshairscale > 0.0f)
 	{
-		size = SCREENHEIGHT * FRACUNIT / 200;
+		size = SCREENHEIGHT * crosshairscale / 200.;
 	}
 	else
 	{
-		size = FRACUNIT;
+		size = 1.;
 	}
 
 	if (crosshairgrow)
 	{
-		size = FixedMul (size, CrosshairSize);
+		size *= CrosshairSize;
 	}
-	w = (CrosshairImage->GetWidth() * size) >> FRACBITS;
-	h = (CrosshairImage->GetHeight() * size) >> FRACBITS;
+	w = int(CrosshairImage->GetWidth() * size);
+	h = int(CrosshairImage->GetHeight() * size);
 
 	if (crosshairhealth)
 	{
@@ -1255,7 +1241,6 @@ void DBaseStatusBar::Draw (EHudState state)
 	{ // Draw current coordinates
 		int height = SmallFont->GetHeight();
 		char labels[3] = { 'X', 'Y', 'Z' };
-		fixed_t *value;
 		int i;
 
 		int vwidth;
@@ -1263,12 +1248,19 @@ void DBaseStatusBar::Draw (EHudState state)
 		int xpos;
 		int y;
 
-		if (con_scaletext == 0)
+		if (active_con_scaletext() == 1)
 		{
 			vwidth = SCREENWIDTH;
 			vheight = SCREENHEIGHT;
 			xpos = vwidth - 80;
 			y = ::ST_Y - height;
+		}
+		else if (active_con_scaletext() > 1)
+		{
+			vwidth = SCREENWIDTH / active_con_scaletext();
+			vheight = SCREENHEIGHT / active_con_scaletext();
+			xpos = vwidth - SmallFont->StringWidth("X: -00000")-6;
+			y = ::ST_Y/4 - height;
 		}
 		else
 		{
@@ -1280,16 +1272,18 @@ void DBaseStatusBar::Draw (EHudState state)
 
 		if (gameinfo.gametype == GAME_Strife)
 		{
-			if (con_scaletext == 0)
+			if (active_con_scaletext() == 1)
 				y -= height * 4;
+			else if (active_con_scaletext() > 3)
+				y -= height;
 			else
 				y -= height * 2;
 		}
 
-		value = &CPlayer->mo->z;
-		for (i = 2, value = &CPlayer->mo->z; i >= 0; y -= height, --value, --i)
+		DVector3 pos = CPlayer->mo->Pos();
+		for (i = 2; i >= 0; y -= height, --i)
 		{
-			mysnprintf (line, countof(line), "%c: %d", labels[i], *value >> FRACBITS);
+			mysnprintf (line, countof(line), "%c: %d", labels[i], int(pos[i]));
 			screen->DrawText (SmallFont, CR_GREEN, xpos, y, line, 
 				DTA_KeepRatio, true,
 				DTA_VirtualWidth, vwidth, DTA_VirtualHeight, vheight, 				
@@ -1411,25 +1405,18 @@ void DBaseStatusBar::DrawLog ()
 {
 	int hudwidth, hudheight;
 
-	if (CPlayer->LogText && *CPlayer->LogText)
+	if (CPlayer->LogText.IsNotEmpty())
 	{
 		// This uses the same scaling as regular HUD messages
-		switch (con_scaletext)
+		if (active_con_scaletext() == 0)
 		{
-		default:
-			hudwidth = SCREENWIDTH;
-			hudheight = SCREENHEIGHT;
-			break;
-
-		case 1:
 			hudwidth = SCREENWIDTH / CleanXfac;
 			hudheight = SCREENHEIGHT / CleanYfac;
-			break;
-
-		case 2:
-			hudwidth = SCREENWIDTH / 2;
-			hudheight = SCREENHEIGHT / 2;
-			break;
+		}
+		else
+		{
+			hudwidth = SCREENWIDTH / active_con_scaletext();
+			hudheight = SCREENHEIGHT / active_con_scaletext();
 		}
 
 		int linelen = hudwidth<640? Scale(hudwidth,9,10)-40 : 560;
@@ -1533,9 +1520,12 @@ void DBaseStatusBar::DrawPowerups ()
 	// Each icon gets a 32x32 block to draw itself in.
 	int x, y;
 	AInventory *item;
+	const int yshift = SmallFont->GetHeight();
 
 	x = -20;
-	y = 17;
+	y = 17 
+		+ (ST_IsTimeVisible()    ? yshift : 0)
+		+ (ST_IsLatencyVisible() ? yshift : 0);
 	for (item = CPlayer->mo->Inventory; item != NULL; item = item->Inventory)
 	{
 		if (item->DrawPowerup (x, y))
@@ -1558,7 +1548,10 @@ void DBaseStatusBar::DrawPowerups ()
 
 void DBaseStatusBar::BlendView (float blend[4])
 {
-	V_AddBlend (BaseBlendR / 255.f, BaseBlendG / 255.f, BaseBlendB / 255.f, BaseBlendA, blend);
+	// [Nash] Allow user to set blend intensity
+	float cnt = (BaseBlendA * underwater_fade_scalar);
+
+	V_AddBlend (BaseBlendR / 255.f, BaseBlendG / 255.f, BaseBlendB / 255.f, cnt, blend);
 	V_AddPlayerBlend(CPlayer, blend, 1.0f, 228);
 
 	if (screen->Accel2D || (CPlayer->camera != NULL && menuactive == MENU_Off && ConsoleState == c_up))
@@ -1669,20 +1662,9 @@ void DBaseStatusBar::ReceivedWeapon (AWeapon *weapon)
 {
 }
 
-void DBaseStatusBar::Serialize (FArchive &arc)
+void DBaseStatusBar::SerializeMessages(FSerializer &arc)
 {
-	if (SaveVersion < 3821)
-	{
-		memset(Messages, 0, sizeof(Messages));
-		arc << Messages[HUDMSGLayer_Default];
-	}
-	else
-	{
-		for (unsigned int i = 0; i < countof(Messages); ++i)
-		{
-			arc << Messages[i];
-		}
-	}
+	arc.Array("hudmessages", Messages, 3, true);
 }
 
 void DBaseStatusBar::ScreenSizeChanged ()
@@ -1690,7 +1672,7 @@ void DBaseStatusBar::ScreenSizeChanged ()
 	st_scale.Callback ();
 	ST_SetNeedRefresh();
 
-	for (unsigned int i = 0; i < countof(Messages); ++i)
+	for (size_t i = 0; i < countof(Messages); ++i)
 	{
 		DHUDMessage *message = Messages[i];
 		while (message != NULL)

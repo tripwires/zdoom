@@ -37,7 +37,7 @@
 #include "p_local.h"
 #include "p_lnspec.h"
 #include "doomstat.h"
-#include "farchive.h"
+#include "serializer.h"
 
 /*
 == InterpolationPoint: node along a camera's path
@@ -60,19 +60,22 @@ public:
 	AInterpolationPoint *ScanForLoop ();
 	void FormChain ();
 
-	void Serialize (FArchive &arc);
+	
+	void Serialize(FSerializer &arc);
 
 	TObjPtr<AInterpolationPoint> Next;
 };
 
-IMPLEMENT_POINTY_CLASS (AInterpolationPoint)
- DECLARE_POINTER (Next)
-END_POINTERS
+IMPLEMENT_CLASS(AInterpolationPoint, false, true)
 
-void AInterpolationPoint::Serialize (FArchive &arc)
+IMPLEMENT_POINTERS_START(AInterpolationPoint)
+	IMPLEMENT_POINTER(Next)
+IMPLEMENT_POINTERS_END
+
+void AInterpolationPoint::Serialize(FSerializer &arc)
 {
 	Super::Serialize (arc);
-	arc << Next;
+	arc("next", Next);
 }
 
 void AInterpolationPoint::BeginPlay ()
@@ -102,11 +105,7 @@ void AInterpolationPoint::FormChain ()
 	if (Next == NULL && (args[3] | args[4]))
 		Printf ("Can't find target for camera node %d\n", tid);
 
-	pitch = (signed int)((char)args[0]) * ANGLE_1;
-	if (pitch <= -ANGLE_90)
-		pitch = -ANGLE_90 + ANGLE_1;
-	else if (pitch >= ANGLE_90)
-		pitch = ANGLE_90 - ANGLE_1;
+	Angles.Pitch = (double)clamp<int>((signed char)args[0], -89, 89);
 
 	if (Next != NULL)
 		Next->FormChain ();
@@ -136,7 +135,7 @@ public:
 	void Tick () {}		// Does absolutely nothing itself
 };
 
-IMPLEMENT_CLASS (AInterpolationSpecial)
+IMPLEMENT_CLASS(AInterpolationSpecial, false, false)
 
 /*
 == PathFollower: something that follows a camera path
@@ -165,12 +164,13 @@ public:
 	void Activate (AActor *activator);
 	void Deactivate (AActor *activator);
 protected:
-	float Splerp (float p1, float p2, float p3, float p4);
-	float Lerp (float p1, float p2);
+	double Splerp (double p1, double p2, double p3, double p4);
+	double Lerp (double p1, double p2);
 	virtual bool Interpolate ();
 	virtual void NewNode ();
 
-	void Serialize (FArchive &arc);
+	
+	void Serialize(FSerializer &arc);
 
 	bool bActive, bJustStepped;
 	TObjPtr<AInterpolationPoint> PrevNode, CurrNode;
@@ -178,23 +178,30 @@ protected:
 	int HoldTime;
 };
 
-IMPLEMENT_POINTY_CLASS (APathFollower)
- DECLARE_POINTER (PrevNode)
- DECLARE_POINTER (CurrNode)
-END_POINTERS
+IMPLEMENT_CLASS(APathFollower, false, true)
 
-void APathFollower::Serialize (FArchive &arc)
+IMPLEMENT_POINTERS_START(APathFollower)
+	IMPLEMENT_POINTER(PrevNode)
+	IMPLEMENT_POINTER(CurrNode)
+IMPLEMENT_POINTERS_END
+
+void APathFollower::Serialize(FSerializer &arc)
 {
 	Super::Serialize (arc);
-	arc << bActive << bJustStepped << PrevNode << CurrNode << Time << HoldTime;
+	arc("active", bActive)
+		("juststepped", bJustStepped)
+		("prevnode", PrevNode)
+		("currnode", CurrNode)
+		("time", Time)
+		("holdtime", HoldTime);
 }
 
 // Interpolate between p2 and p3 along a Catmull-Rom spline
 // http://research.microsoft.com/~hollasch/cgindex/curves/catmull-rom.html
-float APathFollower::Splerp (float p1, float p2, float p3, float p4)
+double APathFollower::Splerp (double p1, double p2, double p3, double p4)
 {
-	float t = Time;
-	float res = 2*p2;
+	double t = Time;
+	double res = 2*p2;
 	res += (p3 - p1) * Time;
 	t *= Time;
 	res += (2*p1 - 5*p2 + 4*p3 - p4) * t;
@@ -204,7 +211,7 @@ float APathFollower::Splerp (float p1, float p2, float p3, float p4)
 }
 
 // Linearly interpolate between p1 and p2
-float APathFollower::Lerp (float p1, float p2)
+double APathFollower::Lerp (double p1, double p2)
 {
 	return p1 + Time * (p2 - p1);
 }
@@ -282,7 +289,7 @@ void APathFollower::Activate (AActor *activator)
 		if (CurrNode != NULL)
 		{
 			NewNode ();
-			SetOrigin (CurrNode->x, CurrNode->y, CurrNode->z);
+			SetOrigin (CurrNode->Pos(), false);
 			Time = 0.f;
 			HoldTime = 0;
 			bJustStepped = true;
@@ -302,9 +309,7 @@ void APathFollower::Tick ()
 		if (CurrNode->args[2])
 		{
 			HoldTime = level.time + CurrNode->args[2] * TICRATE / 8;
-			x = CurrNode->x;
-			y = CurrNode->y;
-			z = CurrNode->z;
+			SetXYZ(CurrNode->Pos());
 		}
 	}
 
@@ -327,7 +332,7 @@ void APathFollower::Tick ()
 
 	if (Interpolate ())
 	{
-		Time += 8.f / ((float)CurrNode->args[1] * (float)TICRATE);
+		Time += float(8.f / ((double)CurrNode->args[1] * (double)TICRATE));
 		if (Time > 1.f)
 		{
 			Time -= 1.f;
@@ -337,9 +342,9 @@ void APathFollower::Tick ()
 			if (CurrNode != NULL)
 				NewNode ();
 			if (CurrNode == NULL || CurrNode->Next == NULL)
-				Deactivate (this);
+				CallDeactivate (this);
 			if ((args[2] & 1) == 0 && CurrNode->Next->Next == NULL)
-				Deactivate (this);
+				CallDeactivate (this);
 		}
 	}
 }
@@ -358,36 +363,34 @@ void APathFollower::NewNode ()
 
 bool APathFollower::Interpolate ()
 {
-	fixed_t dx = 0, dy = 0, dz = 0;
+	DVector3 dpos(0, 0, 0);
+	FLinkContext ctx;
 
 	if ((args[2] & 8) && Time > 0.f)
 	{
-		dx = x;
-		dy = y;
-		dz = z;
+		dpos = Pos();
 	}
 
 	if (CurrNode->Next==NULL) return false;
 
-	UnlinkFromWorld ();
+	UnlinkFromWorld (&ctx);
+	DVector3 newpos;
 	if (args[2] & 1)
 	{	// linear
-		x = FLOAT2FIXED(Lerp (FIXED2FLOAT(CurrNode->x), FIXED2FLOAT(CurrNode->Next->x)));
-		y = FLOAT2FIXED(Lerp (FIXED2FLOAT(CurrNode->y), FIXED2FLOAT(CurrNode->Next->y)));
-		z = FLOAT2FIXED(Lerp (FIXED2FLOAT(CurrNode->z), FIXED2FLOAT(CurrNode->Next->z)));
+		newpos.X = Lerp(CurrNode->X(), CurrNode->Next->X());
+		newpos.Y = Lerp(CurrNode->Y(), CurrNode->Next->Y());
+		newpos.Z = Lerp(CurrNode->Z(), CurrNode->Next->Z());
 	}
 	else
 	{	// spline
 		if (CurrNode->Next->Next==NULL) return false;
 
-		x = FLOAT2FIXED(Splerp (FIXED2FLOAT(PrevNode->x), FIXED2FLOAT(CurrNode->x),
-								FIXED2FLOAT(CurrNode->Next->x), FIXED2FLOAT(CurrNode->Next->Next->x)));
-		y = FLOAT2FIXED(Splerp (FIXED2FLOAT(PrevNode->y), FIXED2FLOAT(CurrNode->y),
-								FIXED2FLOAT(CurrNode->Next->y), FIXED2FLOAT(CurrNode->Next->Next->y)));
-		z = FLOAT2FIXED(Splerp (FIXED2FLOAT(PrevNode->z), FIXED2FLOAT(CurrNode->z),
-								FIXED2FLOAT(CurrNode->Next->z), FIXED2FLOAT(CurrNode->Next->Next->z)));
+		newpos.X = Splerp(PrevNode->X(), CurrNode->X(), CurrNode->Next->X(), CurrNode->Next->Next->X());
+		newpos.Y = Splerp(PrevNode->Y(), CurrNode->Y(), CurrNode->Next->Y(), CurrNode->Next->Next->Y());
+		newpos.Z = Splerp(PrevNode->Z(), CurrNode->Z(), CurrNode->Next->Z(), CurrNode->Next->Next->Z());
 	}
-	LinkToWorld ();
+	SetXYZ(newpos);
+	LinkToWorld (&ctx);
 
 	if (args[2] & 6)
 	{
@@ -395,96 +398,58 @@ bool APathFollower::Interpolate ()
 		{
 			if (args[2] & 1)
 			{ // linear
-				dx = CurrNode->Next->x - CurrNode->x;
-				dy = CurrNode->Next->y - CurrNode->y;
-				dz = CurrNode->Next->z - CurrNode->z;
+				dpos.X = CurrNode->Next->X() - CurrNode->X();
+				dpos.Y = CurrNode->Next->Y() - CurrNode->Y();
+				dpos.Z = CurrNode->Next->Z() - CurrNode->Z();
 			}
 			else if (Time > 0.f)
 			{ // spline
-				dx = x - dx;
-				dy = y - dy;
-				dz = z - dz;
+				dpos = newpos - dpos;
 			}
 			else
 			{
 				int realarg = args[2];
 				args[2] &= ~(2|4|8);
 				Time += 0.1f;
-				dx = x;
-				dy = y;
-				dz = z;
+				dpos = newpos;
 				Interpolate ();
 				Time -= 0.1f;
 				args[2] = realarg;
-				dx = x - dx;
-				dy = y - dy;
-				dz = z - dz;
-				x -= dx;
-				y -= dy;
-				z -= dz;
+				dpos = newpos - dpos;
+				newpos -= dpos;
+				SetXYZ(newpos);
 			}
 			if (args[2] & 2)
 			{ // adjust yaw
-				angle = R_PointToAngle2 (0, 0, dx, dy);
+				Angles.Yaw = dpos.Angle();
 			}
 			if (args[2] & 4)
 			{ // adjust pitch; use floats for precision
-				float fdx = FIXED2FLOAT(dx);
-				float fdy = FIXED2FLOAT(dy);
-				float fdz = FIXED2FLOAT(-dz);
-				float dist = (float)sqrt (fdx*fdx + fdy*fdy);
-				float ang = dist != 0.f ? (float)atan2 (fdz, dist) : 0;
-				pitch = (angle_t)(ang * 2147483648.f / PI);
+				double dist = dpos.XY().Length();
+				Angles.Pitch = dist != 0.f ? VecToAngle(dist, -dpos.Z) : 0.;
 			}
 		}
 		else
 		{
 			if (args[2] & 2)
 			{ // interpolate angle
-				float angle1 = (float)CurrNode->angle;
-				float angle2 = (float)CurrNode->Next->angle;
-				if (angle2 - angle1 <= -2147483648.f)
-				{
-					float lerped = Lerp (angle1, angle2 + 4294967296.f);
-					if (lerped >= 4294967296.f)
-					{
-						angle = (angle_t)(lerped - 4294967296.f);
-					}
-					else
-					{
-						angle = (angle_t)lerped;
-					}
-				}
-				else if (angle2 - angle1 >= 2147483648.f)
-				{
-					float lerped = Lerp (angle1, angle2 - 4294967296.f);
-					if (lerped < 0.f)
-					{
-						angle = (angle_t)(lerped + 4294967296.f);
-					}
-					else
-					{
-						angle = (angle_t)lerped;
-					}
-				}
-				else
-				{
-					angle = (angle_t)Lerp (angle1, angle2);
-				}
+				DAngle angle1 = CurrNode->Angles.Yaw.Normalized180();
+				DAngle angle2 = angle1 + deltaangle(angle1, CurrNode->Next->Angles.Yaw);
+				Angles.Yaw = Lerp(angle1.Degrees, angle2.Degrees);
 			}
 			if (args[2] & 1)
 			{ // linear
 				if (args[2] & 4)
 				{ // interpolate pitch
-					pitch = FLOAT2FIXED(Lerp (FIXED2FLOAT(CurrNode->pitch), FIXED2FLOAT(CurrNode->Next->pitch)));
+					Angles.Pitch = Lerp(CurrNode->Angles.Pitch.Degrees, CurrNode->Next->Angles.Pitch.Degrees);
 				}
 			}
 			else
 			{ // spline
 				if (args[2] & 4)
 				{ // interpolate pitch
-					pitch = FLOAT2FIXED(Splerp (FIXED2FLOAT(PrevNode->pitch), FIXED2FLOAT(CurrNode->pitch),
-						FIXED2FLOAT(CurrNode->Next->pitch), FIXED2FLOAT(CurrNode->Next->Next->pitch)));
+					Angles.Pitch = Splerp(PrevNode->Angles.Pitch.Degrees, CurrNode->Angles.Pitch.Degrees,
+						CurrNode->Next->Angles.Pitch.Degrees, CurrNode->Next->Next->Angles.Pitch.Degrees);
 				}
 			}
 		}
@@ -516,7 +481,7 @@ protected:
 	bool Interpolate ();
 };
 
-IMPLEMENT_CLASS (AActorMover)
+IMPLEMENT_CLASS(AActorMover, false, false)
 
 void AActorMover::BeginPlay()
 {
@@ -548,18 +513,18 @@ bool AActorMover::Interpolate ()
 
 	if (Super::Interpolate ())
 	{
-		fixed_t savedz = tracer->z;
-		tracer->z = z;
-		if (!P_TryMove (tracer, x, y, true))
+		double savedz = tracer->Z();
+		tracer->SetZ(Z());
+		if (!P_TryMove (tracer, Pos(), true))
 		{
-			tracer->z = savedz;
+			tracer->SetZ(savedz);
 			return false;
 		}
 
 		if (args[2] & 2)
-			tracer->angle = angle;
+			tracer->Angles.Yaw = Angles.Yaw;
 		if (args[2] & 4)
-			tracer->pitch = pitch;
+			tracer->Angles.Pitch = Angles.Pitch;
 
 		return true;
 	}
@@ -577,10 +542,11 @@ void AActorMover::Activate (AActor *activator)
 	tracer->flags |= MF_NOGRAVITY;
 	if (args[2] & 128)
 	{
-		tracer->UnlinkFromWorld ();
+		FLinkContext ctx;
+		tracer->UnlinkFromWorld (&ctx);
 		tracer->flags |= MF_NOBLOCKMAP;
 		tracer->flags &= ~MF_SOLID;
-		tracer->LinkToWorld ();
+		tracer->LinkToWorld (&ctx);
 	}
 	if (tracer->flags3 & MF3_ISMONSTER)
 	{
@@ -589,10 +555,7 @@ void AActorMover::Activate (AActor *activator)
 	// Don't let the renderer interpolate between the actor's
 	// old position and its new position.
 	Interpolate ();
-	tracer->PrevX = tracer->x;
-	tracer->PrevY = tracer->y;
-	tracer->PrevZ = tracer->z;
-	tracer->PrevAngle = tracer->angle;
+	tracer->ClearInterpolation();
 }
 
 void AActorMover::Deactivate (AActor *activator)
@@ -602,9 +565,10 @@ void AActorMover::Deactivate (AActor *activator)
 		Super::Deactivate (activator);
 		if (tracer != NULL)
 		{
-			tracer->UnlinkFromWorld ();
+			FLinkContext ctx;
+			tracer->UnlinkFromWorld (&ctx);
 			tracer->flags = ActorFlags::FromInt (special1);
-			tracer->LinkToWorld ();
+			tracer->LinkToWorld (&ctx);
 			tracer->flags2 = ActorFlags2::FromInt (special2);
 		}
 	}
@@ -627,21 +591,24 @@ class AMovingCamera : public APathFollower
 public:
 	void PostBeginPlay ();
 
-	void Serialize (FArchive &arc);
+	
+	void Serialize(FSerializer &arc);
 protected:
 	bool Interpolate ();
 
 	TObjPtr<AActor> Activator;
 };
 
-IMPLEMENT_POINTY_CLASS (AMovingCamera)
- DECLARE_POINTER (Activator)
-END_POINTERS
+IMPLEMENT_CLASS(AMovingCamera, false, true)
 
-void AMovingCamera::Serialize (FArchive &arc)
+IMPLEMENT_POINTERS_START(AMovingCamera)
+	IMPLEMENT_POINTER(Activator)
+IMPLEMENT_POINTERS_END
+
+void AMovingCamera::Serialize(FSerializer &arc)
 {
 	Super::Serialize (arc);
-	arc << Activator;
+	arc("activator", Activator);
 }
 
 void AMovingCamera::PostBeginPlay ()
@@ -667,16 +634,13 @@ bool AMovingCamera::Interpolate ()
 
 	if (Super::Interpolate ())
 	{
-		angle = R_PointToAngle2 (x, y, tracer->x, tracer->y);
+		Angles.Yaw = AngleTo(tracer, true);
 
 		if (args[2] & 4)
-		{ // Also aim camera's pitch; use floats for precision
-			float dx = FIXED2FLOAT(x - tracer->x);
-			float dy = FIXED2FLOAT(y - tracer->y);
-			float dz = FIXED2FLOAT(z - tracer->z - tracer->height/2);
-			float dist = (float)sqrt (dx*dx + dy*dy);
-			float ang = dist != 0.f ? (float)atan2 (dz, dist) : 0;
-			pitch = (angle_t)(ang * 2147483648.f / PI);
+		{ // Also aim camera's pitch;
+			DVector3 diff = Pos() - tracer->PosPlusZ(tracer->Height / 2);
+			double dist = diff.XY().Length();
+			Angles.Pitch = dist != 0.f ? VecToAngle(dist, diff.Z) : 0.;
 		}
 
 		return true;

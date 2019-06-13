@@ -40,9 +40,6 @@
 #include <signal.h>
 #include <new>
 #include <sys/param.h>
-#ifndef NO_GTK
-#include <gtk/gtk.h>
-#endif
 #include <locale.h>
 #if defined(__MACH__) && !defined(NOASM)
 #include <sys/types.h>
@@ -87,10 +84,6 @@ void Mac_I_FatalError(const char* errortext);
 
 // PUBLIC DATA DEFINITIONS -------------------------------------------------
 
-#ifndef NO_GTK
-bool GtkAvailable;
-#endif
-
 // The command line arguments.
 DArgs *Args;
 
@@ -129,7 +122,7 @@ void popterm ()
 		NumTerms--;
 }
 
-void STACK_ARGS call_terms ()
+void call_terms ()
 {
     while (NumTerms > 0)
 	{
@@ -138,7 +131,7 @@ void STACK_ARGS call_terms ()
 	}
 }
 
-static void STACK_ARGS NewFailure ()
+static void NewFailure ()
 {
     I_FatalError ("Failed to allocate memory from system heap");
 }
@@ -180,10 +173,10 @@ static int DoomSpecificInfo (char *buffer, char *end)
 		}
 		else
 		{
-			p += snprintf (buffer+p, size-p, "\n\nviewx = %d", (int)viewx);
-			p += snprintf (buffer+p, size-p, "\nviewy = %d", (int)viewy);
-			p += snprintf (buffer+p, size-p, "\nviewz = %d", (int)viewz);
-			p += snprintf (buffer+p, size-p, "\nviewangle = %x", (unsigned int)viewangle);
+			p += snprintf (buffer+p, size-p, "\n\nviewx = %f", ViewPos.X);
+			p += snprintf (buffer+p, size-p, "\nviewy = %f", ViewPos.Y);
+			p += snprintf (buffer+p, size-p, "\nviewz = %f", ViewPos.Z);
+			p += snprintf (buffer+p, size-p, "\nviewangle = %f", ViewAngle.Degrees);
 		}
 	}
 	buffer[p++] = '\n';
@@ -259,10 +252,6 @@ int main (int argc, char **argv)
 	// Note that the LANG environment variable is overridden by LC_*
 	setenv ("LC_NUMERIC", "C", 1);
 
-#ifndef NO_GTK
-	GtkAvailable = gtk_init_check (&argc, &argv);
-#endif
-	
 	setlocale (LC_ALL, "C");
 
 	if (SDL_Init (0) < 0)

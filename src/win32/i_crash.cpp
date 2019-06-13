@@ -45,7 +45,13 @@
 #include <winternl.h>
 #endif
 #ifndef __GNUC__
+#if _MSC_VER
+#pragma warning(disable:4091)	// this silences a warning for a bogus definition in the Windows 8.1 SDK.
+#endif
 #include <dbghelp.h>
+#if _MSC_VER
+#pragma warning(default:4091)
+#endif
 #endif
 #include <commctrl.h>
 #include <commdlg.h>
@@ -68,54 +74,6 @@
 #include <stdarg.h>
 #include <time.h>
 #include <zlib.h>
-
-#if defined(_WIN64) && defined(__GNUC__)
-struct KNONVOLATILE_CONTEXT_POINTERS {
-    union {
-        PDWORD64 IntegerContext[16];
-        struct {
-            PDWORD64 Rax;
-            PDWORD64 Rcx;
-            PDWORD64 Rdx;
-            PDWORD64 Rbx;
-            PDWORD64 Rsp;
-            PDWORD64 Rbp;
-            PDWORD64 Rsi;
-            PDWORD64 Rdi;
-            PDWORD64 R8;
-            PDWORD64 R9;
-            PDWORD64 R10;
-            PDWORD64 R11;
-            PDWORD64 R12;
-            PDWORD64 R13;
-            PDWORD64 R14;
-            PDWORD64 R15;
-        };
-    };
-};
-typedef
-EXCEPTION_DISPOSITION
-NTAPI
-EXCEPTION_ROUTINE (
-    struct _EXCEPTION_RECORD *ExceptionRecord,
-    PVOID EstablisherFrame,
-    struct _CONTEXT *ContextRecord,
-    PVOID DispatcherContext
-    );
-NTSYSAPI
-EXCEPTION_ROUTINE *
-NTAPI
-RtlVirtualUnwind (
-    DWORD HandlerType,
-    DWORD64 ImageBase,
-    DWORD64 ControlPc,
-    PRUNTIME_FUNCTION FunctionEntry,
-    PCONTEXT ContextRecord,
-    PVOID *HandlerData,
-    PDWORD64 EstablisherFrame,
-    KNONVOLATILE_CONTEXT_POINTERS *ContextPointers
-    );
-#endif
 
 // MACROS ------------------------------------------------------------------
 
@@ -278,6 +236,7 @@ struct MiniDumpThreadData
 // EXTERNAL FUNCTION PROTOTYPES --------------------------------------------
 
 // PUBLIC FUNCTION PROTOTYPES ----------------------------------------------
+void I_FlushBufferedConsoleStuff();
 
 // PRIVATE FUNCTION PROTOTYPES ---------------------------------------------
 
@@ -536,7 +495,7 @@ static DWORD WINAPI WriteMiniDumpInAnotherThread (LPVOID lpParam)
 //
 //==========================================================================
 
-void __cdecl Writef (HANDLE file, const char *format, ...)
+void Writef (HANDLE file, const char *format, ...)
 {
 	char buffer[1024];
 	va_list args;
@@ -673,6 +632,7 @@ void CreateCrashLog (char *custominfo, DWORD customsize, HWND richlog)
 	}
 	if (richlog != NULL)
 	{
+		I_FlushBufferedConsoleStuff();
 		AddFile (WriteLogFile(richlog), "log.rtf");
 	}
 	CloseHandle (DbgProcess);

@@ -92,12 +92,8 @@
 #include "zstring.h"
 #include "gdtoa.h"
 
-#ifndef _MSC_VER
 #include <stdint.h>
-#else
-typedef unsigned __int64 uint64_t;
-typedef signed __int64 int64_t;
-#endif
+
 
 /*
  * MAXEXPDIG is the maximum number of decimal digits needed to store a
@@ -638,6 +634,12 @@ namespace StringFormat
 			}
 			goto fp_begin;
 		}
+		else if (type == 'H')
+		{ // %H is an extension that behaves similarly to %g, except it automatically
+		  // selects precision based on whatever will produce the smallest string.
+			expchar = 'e';
+			goto fp_begin;
+		}
 #if 0
 		// The hdtoa function provided with FreeBSD uses a hexadecimal FP constant.
 		// Microsoft's compiler does not support these, so I would need to hack it
@@ -690,7 +692,7 @@ fp_begin:
 				precision = DEFPREC;
 			}
 			dblarg = va_arg(arglist, double);
-			obuff = dtoaresult = dtoa(dblarg, expchar ? 2 : 3, precision, &expt, &signflag, &dtoaend);
+			obuff = dtoaresult = dtoa(dblarg, type != 'H' ? (expchar ? 2 : 3) : 0, precision, &expt, &signflag, &dtoaend);
 //fp_common:
 			decimal_point = localeconv()->decimal_point;
 			flags |= F_SIGNED;
@@ -740,6 +742,22 @@ fp_begin:
 						{
 							precision = ndig;
 						}
+					}
+				}
+				else if (type == 'H')
+				{
+					if (expt > -(ndig + 2) && expt <= (ndig + 4))
+					{ // Make %H smell like %f
+						expchar = '\0';
+						precision = ndig - expt;
+						if (precision < 0)
+						{
+							precision = 0;
+						}
+					}
+					else
+					{// Make %H smell like %e
+						precision = ndig;
 					}
 				}
 				if (expchar)

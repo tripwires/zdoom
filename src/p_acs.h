@@ -44,6 +44,7 @@
 
 class FFont;
 class FileReader;
+struct line_t;
 
 
 enum
@@ -80,8 +81,8 @@ class ACSStringPool
 {
 public:
 	ACSStringPool();
-	int AddString(const char *str, const SDWORD *stack, int stackdepth);
-	int AddString(FString &str, const SDWORD *stack, int stackdepth);
+	int AddString(const char *str);
+	int AddString(FString &str);
 	const char *GetString(int strnum);
 	void LockString(int strnum);
 	void UnlockString(int strnum);
@@ -94,12 +95,12 @@ public:
 	void PurgeStrings();
 	void Clear();
 	void Dump() const;
-	void ReadStrings(PNGHandle *png, DWORD id);
-	void WriteStrings(FILE *file, DWORD id) const;
+	void ReadStrings(FSerializer &file, const char *key);
+	void WriteStrings(FSerializer &file, const char *key) const;
 
 private:
 	int FindString(const char *str, size_t len, unsigned int h, unsigned int bucketnum);
-	int InsertString(FString &str, unsigned int h, unsigned int bucketnum, const SDWORD *stack, int stackdepth);
+	int InsertString(FString &str, unsigned int h, unsigned int bucketnum);
 	void FindFirstFreeEntry(unsigned int base);
 
 	enum { NUM_BUCKETS = 251 };
@@ -119,11 +120,10 @@ private:
 };
 extern ACSStringPool GlobalACSStrings;
 
-void P_CollectACSGlobalStrings(const SDWORD *stack, int stackdepth);
-void P_ReadACSVars(PNGHandle *);
-void P_WriteACSVars(FILE*);
+void P_CollectACSGlobalStrings();
+void P_ReadACSVars(FSerializer &);
+void P_WriteACSVars(FSerializer &);
 void P_ClearACSVars(bool);
-void P_SerializeACSScriptNumber(FArchive &arc, int &scriptnum, bool was2byte);
 
 struct ACSProfileInfo
 {
@@ -270,6 +270,9 @@ enum
 	SCRIPT_Unloading	= 13,
 	SCRIPT_Disconnect	= 14,
 	SCRIPT_Return		= 15,
+	SCRIPT_Event		= 16, // [BB]
+	SCRIPT_Kill			= 17, // [JM]
+	SCRIPT_Reopen		= 18, // [Nash]
 };
 
 // Script flags
@@ -322,7 +325,7 @@ public:
 	static void StaticUnloadModules ();
 	static bool StaticCheckAllGood ();
 	static FBehavior *StaticGetModule (int lib);
-	static void StaticSerializeModuleStates (FArchive &arc);
+	static void StaticSerializeModuleStates (FSerializer &arc);
 	static void StaticMarkLevelVarStrings();
 	static void StaticLockLevelVarStrings();
 	static void StaticUnlockLevelVarStrings();
@@ -361,13 +364,13 @@ private:
 
 	void LoadScriptsDirectory ();
 
-	static int STACK_ARGS SortScripts (const void *a, const void *b);
+	static int SortScripts (const void *a, const void *b);
 	void UnencryptStrings ();
 	void UnescapeStringTable(BYTE *chunkstart, BYTE *datastart, bool haspadding);
 	int FindStringInChunk (DWORD *chunk, const char *varname) const;
 
-	void SerializeVars (FArchive &arc);
-	void SerializeVarSet (FArchive &arc, SDWORD *vars, int max);
+	void SerializeVars (FSerializer &arc);
+	void SerializeVarSet (FSerializer &arc, SDWORD *vars, int max);
 
 	void MarkMapVarStrings() const;
 	void LockMapVarStrings() const;
@@ -504,7 +507,7 @@ public:
 		PCD_PLAYERGOLDSKULL,
 		PCD_PLAYERBLACKCARD,
 		PCD_PLAYERSILVERCARD,
-		PCD_PLAYERONTEAM,
+		PCD_ISNETWORKGAME,
 		PCD_PLAYERTEAM,
 /*120*/	PCD_PLAYERHEALTH,
 		PCD_PLAYERARMORPOINTS,
@@ -519,7 +522,7 @@ public:
 /*130*/	PCD_LSPEC6DIRECT,		// be given names like PCD_DUMMY.
 		PCD_PRINTNAME,
 		PCD_MUSICCHANGE,
-		PCD_TEAM2FRAGPOINTS,
+		PCD_CONSOLECOMMANDDIRECT,
 		PCD_CONSOLECOMMAND,
 		PCD_SINGLEPLAYER,		// [RH] End of Skull Tag p-codes
 		PCD_FIXEDMUL,
@@ -769,6 +772,8 @@ public:
 		PCD_PRINTSCRIPTCHARARRAY,
 		PCD_PRINTSCRIPTCHRANGE,
 /*380*/	PCD_STRCPYTOSCRIPTCHRANGE,
+		PCD_LSPEC5EX,
+		PCD_LSPEC5EXRESULT,
 
 /*381*/	PCODE_COMMAND_COUNT
 	};
@@ -855,7 +860,7 @@ public:
 		const int *args, int argcount, int flags);
 	~DLevelScript ();
 
-	void Serialize (FArchive &arc);
+	void Serialize(FSerializer &arc);
 	int RunScript ();
 
 	inline void SetState (EScriptState newstate) { state = newstate; }
@@ -865,22 +870,21 @@ public:
 
 	void MarkLocalVarStrings() const
 	{
-		GlobalACSStrings.MarkStringArray(localvars, numlocalvars);
+		GlobalACSStrings.MarkStringArray(&Localvars[0], Localvars.Size());
 	}
 	void LockLocalVarStrings() const
 	{
-		GlobalACSStrings.LockStringArray(localvars, numlocalvars);
+		GlobalACSStrings.LockStringArray(&Localvars[0], Localvars.Size());
 	}
 	void UnlockLocalVarStrings() const
 	{
-		GlobalACSStrings.UnlockStringArray(localvars, numlocalvars);
+		GlobalACSStrings.UnlockStringArray(&Localvars[0], Localvars.Size());
 	}
 
 protected:
 	DLevelScript	*next, *prev;
 	int				script;
-	SDWORD			*localvars;
-	int				numlocalvars;
+	TArray<int32_t>	Localvars;
 	int				*pc;
 	EScriptState	state;
 	int				statedata;
@@ -905,20 +909,21 @@ protected:
 	static int CountPlayers ();
 	static void SetLineTexture (int lineid, int side, int position, int name);
 	static void ReplaceTextures (int fromname, int toname, int flags);
-	static int DoSpawn (int type, fixed_t x, fixed_t y, fixed_t z, int tid, int angle, bool force);
+	static int DoSpawn (int type, const DVector3 &pos, int tid, DAngle angle, bool force);
+	static int DoSpawn(int type, int x, int y, int z, int tid, int angle, bool force);
 	static bool DoCheckActorTexture(int tid, AActor *activator, int string, bool floor);
 	int DoSpawnSpot (int type, int spot, int tid, int angle, bool forced);
 	int DoSpawnSpotFacing (int type, int spot, int tid, bool forced);
 	int DoClassifyActor (int tid);
-	int CallFunction(int argCount, int funcIndex, SDWORD *args, const SDWORD *stack, int stackdepth);
+	int CallFunction(int argCount, int funcIndex, SDWORD *args);
 
-	void DoFadeTo (int r, int g, int b, int a, fixed_t time);
+	void DoFadeTo (int r, int g, int b, int a, int time);
 	void DoFadeRange (int r1, int g1, int b1, int a1,
-		int r2, int g2, int b2, int a2, fixed_t time);
+		int r2, int g2, int b2, int a2, int time);
 	void DoSetFont (int fontnum);
 	void SetActorProperty (int tid, int property, int value);
 	void DoSetActorProperty (AActor *actor, int property, int value);
-	int GetActorProperty (int tid, int property, const SDWORD *stack, int stackdepth);
+	int GetActorProperty (int tid, int property);
 	int CheckActorProperty (int tid, int property, int value);
 	int GetPlayerInput (int playernum, int inputnum);
 
@@ -939,7 +944,7 @@ public:
 	DACSThinker ();
 	~DACSThinker ();
 
-	void Serialize (FArchive &arc);
+	void Serialize(FSerializer &arc);
 	void Tick ();
 
 	typedef TMap<int, DLevelScript *> ScriptMap;
@@ -960,8 +965,6 @@ private:
 // The structure used to control scripts between maps
 struct acsdefered_t
 {
-	struct acsdefered_t *next;
-
 	enum EType
 	{
 		defexecute,
@@ -974,6 +977,6 @@ struct acsdefered_t
 	int playernum;
 };
 
-FArchive &operator<< (FArchive &arc, acsdefered_t *&defer);
+FSerializer &Serialize(FSerializer &arc, const char *key, acsdefered_t &defer, acsdefered_t *def);
 
 #endif //__P_ACS_H__

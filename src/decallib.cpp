@@ -48,11 +48,11 @@
 #include "g_level.h"
 #include "colormatcher.h"
 #include "b_bot.h"
-#include "farchive.h"
+#include "serializer.h"
 
 FDecalLib DecalLibrary;
 
-static fixed_t ReadScale (FScanner &sc);
+static double ReadScale (FScanner &sc);
 static TArray<BYTE> DecalTranslations;
 
 // A decal group holds multiple decals and returns one randomly
@@ -113,20 +113,22 @@ struct DDecalThinker : public DThinker
 	HAS_OBJECT_POINTERS
 public:
 	DDecalThinker (DBaseDecal *decal) : DThinker (STAT_DECALTHINKER), TheDecal (decal) {}
-	void Serialize (FArchive &arc);
+	void Serialize(FSerializer &arc);
 	TObjPtr<DBaseDecal> TheDecal;
 protected:
 	DDecalThinker () : DThinker (STAT_DECALTHINKER) {}
 };
 
-IMPLEMENT_POINTY_CLASS (DDecalThinker)
- DECLARE_POINTER (TheDecal)
-END_POINTERS
+IMPLEMENT_CLASS(DDecalThinker, false, true)
 
-void DDecalThinker::Serialize (FArchive &arc)
+IMPLEMENT_POINTERS_START(DDecalThinker)
+	IMPLEMENT_POINTER(TheDecal)
+IMPLEMENT_POINTERS_END
+
+void DDecalThinker::Serialize(FSerializer &arc)
 {
 	Super::Serialize (arc);
-	arc << TheDecal;
+	arc("thedecal", TheDecal);
 }
 
 struct FDecalFaderAnim : public FDecalAnimator
@@ -143,12 +145,12 @@ class DDecalFader : public DDecalThinker
 	DECLARE_CLASS (DDecalFader, DDecalThinker)
 public:
 	DDecalFader (DBaseDecal *decal) : DDecalThinker (decal) {}
-	void Serialize (FArchive &arc);
+	void Serialize(FSerializer &arc);
 	void Tick ();
 
 	int TimeToStartDecay;
 	int TimeToEndDecay;
-	fixed_t StartTrans;
+	double StartTrans;
 private:
 	DDecalFader () {}
 };
@@ -168,7 +170,7 @@ class DDecalColorer : public DDecalThinker
 	DECLARE_CLASS (DDecalColorer, DDecalThinker)
 public:
 	DDecalColorer (DBaseDecal *decal) : DDecalThinker (decal) {}
-	void Serialize (FArchive &arc);
+	void Serialize(FSerializer &arc);
 	void Tick ();
 
 	int TimeToStartDecay;
@@ -186,7 +188,7 @@ struct FDecalStretcherAnim : public FDecalAnimator
 
 	int StretchStart;
 	int StretchTime;
-	fixed_t GoalX, GoalY;
+	double GoalX, GoalY;
 };
 
 class DDecalStretcher : public DDecalThinker
@@ -194,15 +196,15 @@ class DDecalStretcher : public DDecalThinker
 	DECLARE_CLASS (DDecalStretcher, DDecalThinker)
 public:
 	DDecalStretcher (DBaseDecal *decal) : DDecalThinker (decal) {}
-	void Serialize (FArchive &arc);
+	void Serialize(FSerializer &arc);
 	void Tick ();
 
 	int TimeToStart;
 	int TimeToStop;
-	fixed_t GoalX;
-	fixed_t StartX;
-	fixed_t GoalY;
-	fixed_t StartY;
+	double GoalX;
+	double StartX;
+	double GoalY;
+	double StartY;
 	bool bStretchX;
 	bool bStretchY;
 	bool bStarted;
@@ -217,7 +219,7 @@ struct FDecalSliderAnim : public FDecalAnimator
 
 	int SlideStart;
 	int SlideTime;
-	fixed_t /*DistX,*/ DistY;
+	double /*DistX,*/ DistY;
 };
 
 class DDecalSlider : public DDecalThinker
@@ -225,15 +227,15 @@ class DDecalSlider : public DDecalThinker
 	DECLARE_CLASS (DDecalSlider, DDecalThinker)
 public:
 	DDecalSlider (DBaseDecal *decal) : DDecalThinker (decal) {}
-	void Serialize (FArchive &arc);
+	void Serialize(FSerializer &arc);
 	void Tick ();
 
 	int TimeToStart;
 	int TimeToStop;
-/*	fixed_t DistX; */
-	fixed_t DistY;
-	fixed_t StartX;
-	fixed_t StartY;
+/*	double DistX; */
+	double DistY;
+	double StartX;
+	double StartY;
 	bool bStarted;
 private:
 	DDecalSlider () {}
@@ -364,9 +366,9 @@ void FDecalLib::ReadAllDecals ()
 		ReadDecals (sc);
 	}
 	// Supporting code to allow specifying decals directly in the DECORATE lump
-	for (i = 0; i < PClass::m_RuntimeActors.Size(); i++)
+	for (i = 0; i < PClassActor::AllActorClasses.Size(); i++)
 	{
-		AActor *def = (AActor*)GetDefaultByType (PClass::m_RuntimeActors[i]);
+		AActor *def = (AActor*)GetDefaultByType (PClassActor::AllActorClasses[i]);
 
 		FName v = ENamedName(intptr_t(def->DecalGenerator));
 		if (v.IsValidName())
@@ -453,10 +455,10 @@ void FDecalLib::ParseDecal (FScanner &sc)
 
 	memset ((void *)&newdecal, 0, sizeof(newdecal));
 	newdecal.PicNum.SetInvalid();
-	newdecal.ScaleX = newdecal.ScaleY = FRACUNIT;
+	newdecal.ScaleX = newdecal.ScaleY = 1.;
 	newdecal.RenderFlags = RF_WALLSPRITE;
 	newdecal.RenderStyle = STYLE_Normal;
-	newdecal.Alpha = 0x8000;
+	newdecal.Alpha = 1.;
 
 	for (;;)
 	{
@@ -492,13 +494,13 @@ void FDecalLib::ParseDecal (FScanner &sc)
 
 		case DECAL_ADD:
 			sc.MustGetFloat ();
-			newdecal.Alpha = (WORD)(32768.f * sc.Float);
+			newdecal.Alpha = sc.Float;
 			newdecal.RenderStyle = STYLE_Add;
 			break;
 
 		case DECAL_TRANSLUCENT:
 			sc.MustGetFloat ();
-			newdecal.Alpha = (WORD)(32768.f * sc.Float);
+			newdecal.Alpha = sc.Float;
 			newdecal.RenderStyle = STYLE_Translucent;
 			break;
 
@@ -530,7 +532,7 @@ void FDecalLib::ParseDecal (FScanner &sc)
 			sc.MustGetString ();
 			if (!sc.Compare("BloodDefault"))
 			{
-				newdecal.ShadeColor = V_GetColor (NULL, sc.String);
+				newdecal.ShadeColor = V_GetColor (NULL, sc);
 			}
 			else
 			{
@@ -545,8 +547,8 @@ void FDecalLib::ParseDecal (FScanner &sc)
 		case DECAL_COLORS:
 			DWORD startcolor, endcolor;
 
-			sc.MustGetString (); startcolor = V_GetColor (NULL, sc.String);
-			sc.MustGetString (); endcolor   = V_GetColor (NULL, sc.String);
+			sc.MustGetString (); startcolor = V_GetColor (NULL, sc);
+			sc.MustGetString (); endcolor   = V_GetColor (NULL, sc);
 			newdecal.Translation = GenerateTranslation (startcolor, endcolor)->Index;
 			break;
 
@@ -601,7 +603,7 @@ void FDecalLib::ParseDecalGroup (FScanner &sc)
 
 void FDecalLib::ParseGenerator (FScanner &sc)
 {
-	const PClass *type;
+	PClassActor *type;
 	FDecalBase *decal;
 	bool optional = false;
 
@@ -610,8 +612,8 @@ void FDecalLib::ParseGenerator (FScanner &sc)
 	optional = sc.Compare("optional");
 	if (optional) sc.MustGetString();
 
-	type = PClass::FindClass (sc.String);
-	if (type == NULL || type->ActorInfo == NULL)
+	type = PClass::FindActor (sc.String);
+	if (type == NULL)
 	{
 		if (!optional) sc.ScriptError ("%s is not an actor.", sc.String);
 	}
@@ -681,7 +683,7 @@ void FDecalLib::ParseFader (FScanner &sc)
 void FDecalLib::ParseStretcher (FScanner &sc)
 {
 	FString stretcherName;
-	fixed_t goalX = -1, goalY = -1;
+	double goalX = -1, goalY = -1;
 	int startTime = 0, takeTime = 0;
 
 	sc.MustGetString ();
@@ -732,7 +734,7 @@ void FDecalLib::ParseStretcher (FScanner &sc)
 void FDecalLib::ParseSlider (FScanner &sc)
 {
 	FString sliderName;
-	fixed_t distX = 0, distY = 0;
+	double distX = 0, distY = 0;
 	int startTime = 0, takeTime = 0;
 
 	sc.MustGetString ();
@@ -773,7 +775,7 @@ void FDecalLib::ParseSlider (FScanner &sc)
 		else if (sc.Compare ("DistY"))
 		{
 			sc.MustGetFloat ();
-			distY = (fixed_t)(sc.Float * FRACUNIT);
+			distY = sc.Float;
 		}
 		else
 		{
@@ -817,7 +819,7 @@ void FDecalLib::ParseColorchanger (FScanner &sc)
 		else if (sc.Compare ("Color"))
 		{
 			sc.MustGetString ();
-			goal = V_GetColor (NULL, sc.String);
+			goal = V_GetColor (NULL, sc);
 		}
 		else
 		{
@@ -1046,7 +1048,7 @@ void FDecalTemplate::ApplyToDecal (DBaseDecal *decal, side_t *wall) const
 	decal->ScaleX = ScaleX;
 	decal->ScaleY = ScaleY;
 	decal->PicNum = PicNum;
-	decal->Alpha = Alpha << 1;
+	decal->Alpha = Alpha;
 	decal->RenderStyle = RenderStyle;
 	decal->RenderFlags = (RenderFlags & ~(DECAL_RandomFlipX|DECAL_RandomFlipY)) |
 		(decal->RenderFlags & (RF_RELMASK|RF_CLIPMASK|RF_INVISIBLE|RF_ONESIDED));
@@ -1151,12 +1153,14 @@ FDecalAnimator::~FDecalAnimator ()
 {
 }
 
-IMPLEMENT_CLASS (DDecalFader)
+IMPLEMENT_CLASS(DDecalFader, false, false)
 
-void DDecalFader::Serialize (FArchive &arc)
+void DDecalFader::Serialize(FSerializer &arc)
 {
 	Super::Serialize (arc);
-	arc << TimeToStartDecay << TimeToEndDecay << StartTrans;
+	arc("starttime", TimeToStartDecay)
+		("endtime", TimeToEndDecay)
+		("starttrans", StartTrans);
 }
 
 void DDecalFader::Tick ()
@@ -1184,7 +1188,7 @@ void DDecalFader::Tick ()
 
 		int distanceToEnd = TimeToEndDecay - level.maptime;
 		int fadeDistance = TimeToEndDecay - TimeToStartDecay;
-		TheDecal->Alpha = Scale (StartTrans, distanceToEnd, fadeDistance);
+		TheDecal->Alpha = StartTrans * distanceToEnd / fadeDistance;
 	}
 }
 
@@ -1198,20 +1202,20 @@ DThinker *FDecalFaderAnim::CreateThinker (DBaseDecal *actor, side_t *wall) const
 	return fader;
 }
 
-IMPLEMENT_CLASS (DDecalStretcher)
+IMPLEMENT_CLASS(DDecalStretcher, false, false)
 
-void DDecalStretcher::Serialize (FArchive &arc)
+void DDecalStretcher::Serialize(FSerializer &arc)
 {
 	Super::Serialize (arc);
-	arc << TimeToStart
-		<< TimeToStop
-		<< GoalX
-		<< StartX
-		<< bStretchX
-		<< GoalY
-		<< StartY
-		<< bStretchY
-		<< bStarted;
+	arc("starttime", TimeToStart)
+		("endtime", TimeToStop)
+		("goalx", GoalX)
+		("startx", StartX)
+		("stretchx", bStretchX)
+		("goaly", GoalY)
+		("starty", StartY)
+		("stretchy", bStretchY)
+		("started", bStarted);
 }
 
 DThinker *FDecalStretcherAnim::CreateThinker (DBaseDecal *actor, side_t *wall) const
@@ -1228,6 +1232,7 @@ DThinker *FDecalStretcherAnim::CreateThinker (DBaseDecal *actor, side_t *wall) c
 	}
 	else
 	{
+		thinker->GoalX = 0;
 		thinker->bStretchX = false;
 	}
 	if (GoalY >= 0)
@@ -1237,6 +1242,7 @@ DThinker *FDecalStretcherAnim::CreateThinker (DBaseDecal *actor, side_t *wall) c
 	}
 	else
 	{
+		thinker->GoalY = 0;
 		thinker->bStretchY = false;
 	}
 	thinker->bStarted = false;
@@ -1278,26 +1284,24 @@ void DDecalStretcher::Tick ()
 	int maxDistance = TimeToStop - TimeToStart;
 	if (bStretchX)
 	{
-		TheDecal->ScaleX = StartX + Scale (GoalX - StartX, distance, maxDistance);
+		TheDecal->ScaleX = StartX + (GoalX - StartX) * distance / maxDistance;
 	}
 	if (bStretchY)
 	{
-		TheDecal->ScaleY = StartY + Scale (GoalY - StartY, distance, maxDistance);
+		TheDecal->ScaleY = StartY + (GoalY - StartY) * distance / maxDistance;
 	}
 }
 
-IMPLEMENT_CLASS (DDecalSlider)
+IMPLEMENT_CLASS(DDecalSlider, false, false)
 
-void DDecalSlider::Serialize (FArchive &arc)
+void DDecalSlider::Serialize(FSerializer &arc)
 {
 	Super::Serialize (arc);
-	arc << TimeToStart
-		<< TimeToStop
-		/*<< DistX*/
-		<< DistY
-		/*<< StartX*/
-		<< StartY
-		<< bStarted;
+	arc("starttime", TimeToStart)
+		("endtime", TimeToStop)
+		("disty", DistY)
+		("starty", StartY)
+		("started", bStarted);
 }
 
 DThinker *FDecalSliderAnim::CreateThinker (DBaseDecal *actor, side_t *wall) const
@@ -1339,8 +1343,8 @@ void DDecalSlider::Tick ()
 
 	int distance = level.maptime - TimeToStart;
 	int maxDistance = TimeToStop - TimeToStart;
-	/*TheDecal->LeftDistance = StartX + Scale (DistX, distance, maxDistance);*/
-	TheDecal->Z = StartY + Scale (DistY, distance, maxDistance);
+	/*TheDecal->LeftDistance = StartX + DistX * distance / maxDistance);*/
+	TheDecal->Z = StartY + DistY * distance / maxDistance;
 }
 
 DThinker *FDecalCombinerAnim::CreateThinker (DBaseDecal *actor, side_t *wall) const
@@ -1368,13 +1372,15 @@ FDecalAnimator *FDecalLib::FindAnimator (const char *name)
 	return NULL;
 }
 
+IMPLEMENT_CLASS(DDecalColorer, false, false)
 
-IMPLEMENT_CLASS (DDecalColorer)
-
-void DDecalColorer::Serialize (FArchive &arc)
+void DDecalColorer::Serialize(FSerializer &arc)
 {
 	Super::Serialize (arc);
-	arc << TimeToStartDecay << TimeToEndDecay << StartColor << GoalColor;
+	arc("starttime", TimeToStartDecay)
+		("endtime", TimeToEndDecay)
+		("startcolor", StartColor)
+		("goalcolor", GoalColor);
 }
 
 void DDecalColorer::Tick ()
@@ -1428,8 +1434,8 @@ DThinker *FDecalColorerAnim::CreateThinker (DBaseDecal *actor, side_t *wall) con
 	return Colorer;
 }
 
-static fixed_t ReadScale (FScanner &sc)
+static double ReadScale (FScanner &sc)
 {
 	sc.MustGetFloat ();
-	return fixed_t(clamp (sc.Float * FRACUNIT, 256.0, 256.0*FRACUNIT));
+	return clamp (sc.Float, 1/256.0, 256.0);
 }

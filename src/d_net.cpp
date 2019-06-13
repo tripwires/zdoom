@@ -60,6 +60,8 @@
 #include "v_video.h"
 #include "p_spec.h"
 #include "hardware.h"
+#include "r_utility.h"
+#include "a_keys.h"
 #include "intermission/intermission.h"
 
 EXTERN_CVAR (Int, disableautosave)
@@ -230,7 +232,7 @@ static struct TicSpecial
 
 		specialsize = MAX(specialsize * 2, needed + 30);
 
-		DPrintf ("Expanding special size to %zu\n", specialsize);
+		DPrintf (DMSG_NOTIFY, "Expanding special size to %zu\n", specialsize);
 
 		for (i = 0; i < BACKUPTICS; i++)
 			streams[i] = (BYTE *)M_Realloc (streams[i], specialsize);
@@ -321,6 +323,8 @@ void Net_ClearBuffers ()
 	memset (netcmds, 0, sizeof(netcmds));
 	memset (nettics, 0, sizeof(nettics));
 	memset (nodeingame, 0, sizeof(nodeingame));
+	memset (nodeforplayer, 0, sizeof(nodeforplayer));
+	memset (playerfornode, 0, sizeof(playerfornode));
 	memset (remoteresend, 0, sizeof(remoteresend));
 	memset (resendto, 0, sizeof(resendto));
 	memset (resendcount, 0, sizeof(resendcount));
@@ -1739,7 +1743,7 @@ void D_CheckNetGame (void)
 		Printf("Arbitrator selected " TEXTCOLOR_BLUE "%s" TEXTCOLOR_NORMAL " networking mode.\n", NetMode == NET_PeerToPeer ? "peer to peer" : "packet server");
 	}
 
-	Printf ("player %i of %i (%i nodes)\n",
+	if (!batchrun) Printf ("player %i of %i (%i nodes)\n",
 			consoleplayer+1, doomcom.numplayers, doomcom.numnodes);
 }
 
@@ -2071,7 +2075,7 @@ BYTE *FDynamicBuffer::GetData (int *len)
 }
 
 
-static int KillAll(const PClass *cls)
+static int KillAll(PClassActor *cls)
 {
 	AActor *actor;
 	int killcount = 0;
@@ -2198,10 +2202,11 @@ void Net_DoCommand (int type, BYTE **stream, int player)
 
 	case DEM_WARPCHEAT:
 		{
-			int x, y;
+			int x, y, z;
 			x = ReadWord (stream);
 			y = ReadWord (stream);
-			P_TeleportMove (players[player].mo, x * 65536, y * 65536, ONFLOORZ, true);
+			z = ReadWord (stream);
+			P_TeleportMove (players[player].mo, DVector3(x, y, z), true);
 		}
 		break;
 
@@ -2291,7 +2296,7 @@ void Net_DoCommand (int type, BYTE **stream, int player)
 	case DEM_SUMMONFRIEND2:
 	case DEM_SUMMONFOE2:
 		{
-			const PClass *typeinfo;
+			PClassActor *typeinfo;
 			int angle = 0;
 			SWORD tid = 0;
 			BYTE special = 0;
@@ -2306,8 +2311,8 @@ void Net_DoCommand (int type, BYTE **stream, int player)
 				for(i = 0; i < 5; i++) args[i] = ReadLong(stream);
 			}
 
-			typeinfo = PClass::FindClass (s);
-			if (typeinfo != NULL && typeinfo->ActorInfo != NULL)
+			typeinfo = PClass::FindActor(s);
+			if (typeinfo != NULL)
 			{
 				AActor *source = players[player].mo;
 				if (source != NULL)
@@ -2319,10 +2324,7 @@ void Net_DoCommand (int type, BYTE **stream, int player)
 					else
 					{
 						const AActor *def = GetDefaultByType (typeinfo);
-						fixedvec3 spawnpos = source->Vec3Offset(
-							FixedMul (def->radius * 2 + source->radius, finecosine[source->angle>>ANGLETOFINESHIFT]),
-							FixedMul (def->radius * 2 + source->radius, finesine[source->angle>>ANGLETOFINESHIFT]),
-							8 * FRACUNIT);
+						DVector3 spawnpos = source->Vec3Angle(def->radius * 2 + source->radius, source->Angles.Yaw, 8.);
 
 						AActor *spawned = Spawn (typeinfo, spawnpos, ALLOW_REPLACE);
 						if (spawned != NULL)
@@ -2349,7 +2351,7 @@ void Net_DoCommand (int type, BYTE **stream, int player)
 						}
 						if (type >= DEM_SUMMON2 && type <= DEM_SUMMONFOE2)
 						{
-							spawned->angle = source->angle - (ANGLE_1 * angle);
+							spawned->Angles.Yaw = source->Angles.Yaw - angle;
 							spawned->tid = tid;
 							spawned->special = special;
 							for(i = 0; i < 5; i++) {
@@ -2367,25 +2369,19 @@ void Net_DoCommand (int type, BYTE **stream, int player)
 		{
 			FTraceResults trace;
 
-			angle_t ang = players[player].mo->angle  >> ANGLETOFINESHIFT;
-			angle_t pitch = (angle_t)(players[player].mo->pitch) >> ANGLETOFINESHIFT;
-			fixed_t vx = FixedMul (finecosine[pitch], finecosine[ang]);
-			fixed_t vy = FixedMul (finecosine[pitch], finesine[ang]);
-			fixed_t vz = -finesine[pitch];
+			DAngle ang = players[player].mo->Angles.Yaw;
+			DAngle pitch = players[player].mo->Angles.Pitch;
+			double c = pitch.Cos();
+			DVector3 vec(c * ang.Cos(), c * ang.Sin(), -pitch.Sin());
 
 			s = ReadString (stream);
 
-			if (Trace (players[player].mo->X(), players[player].mo->Y(),
-				players[player].mo->Z() + players[player].mo->height - (players[player].mo->height>>2),
-				players[player].mo->Sector,
-				vx, vy, vz, 172*FRACUNIT, 0, ML_BLOCKEVERYTHING, players[player].mo,
-				trace, TRACE_NoSky))
+			if (Trace (players[player].mo->PosPlusZ(players[player].mo->Height/2), players[player].mo->Sector, 
+				vec, 172., 0, ML_BLOCKEVERYTHING, players[player].mo, trace, TRACE_NoSky))
 			{
 				if (trace.HitType == TRACE_HitWall)
 				{
-					DImpactDecal::StaticCreate (s,
-						trace.X, trace.Y, trace.Z,
-						trace.Line->sidedef[trace.Side], NULL);
+					DImpactDecal::StaticCreate (s, trace.HitPos, trace.Line->sidedef[trace.Side], NULL);
 				}
 			}
 		}
@@ -2506,7 +2502,7 @@ void Net_DoCommand (int type, BYTE **stream, int player)
 
 	case DEM_RUNSPECIAL:
 		{
-			int snum = ReadByte(stream);
+			int snum = ReadWord(stream);
 			int argn = ReadByte(stream);
 			int arg[5] = { 0, 0, 0, 0, 0 };
 
@@ -2537,7 +2533,7 @@ void Net_DoCommand (int type, BYTE **stream, int player)
 	case DEM_MORPHEX:
 		{
 			s = ReadString (stream);
-			const char *msg = cht_Morph (players + player, PClass::FindClass (s), false);
+			const char *msg = cht_Morph (players + player, dyn_cast<PClassPlayerPawn>(PClass::FindClass (s)), false);
 			if (player == consoleplayer)
 			{
 				Printf ("%s\n", *msg != '\0' ? msg : "Morph failed.");
@@ -2569,12 +2565,12 @@ void Net_DoCommand (int type, BYTE **stream, int player)
 		{
 			char *classname = ReadString (stream);
 			int killcount = 0;
-			const PClass *cls = PClass::FindClass(classname);
+			PClassActor *cls = PClass::FindActor(classname);
 
-			if (cls != NULL && cls->ActorInfo != NULL)
+			if (cls != NULL)
 			{
 				killcount = KillAll(cls);
-				const PClass *cls_rep = cls->GetReplacement();
+				PClassActor *cls_rep = cls->GetReplacement();
 				if (cls != cls_rep)
 				{
 					killcount += KillAll(cls_rep);
@@ -2592,8 +2588,8 @@ void Net_DoCommand (int type, BYTE **stream, int player)
 	{
 		char *classname = ReadString(stream);
 		int removecount = 0;
-		const PClass *cls = PClass::FindClass(classname);
-		if (cls != NULL && cls->ActorInfo != NULL)
+		PClassActor *cls = PClass::FindActor(classname);
+		if (cls != NULL && cls->IsKindOf(RUNTIME_CLASS(PClassActor)))
 		{
 			removecount = RemoveClass(cls);
 			const PClass *cls_rep = cls->GetReplacement();
@@ -2636,7 +2632,7 @@ void Net_DoCommand (int type, BYTE **stream, int player)
 			}
 			for(i = 0; i < count; ++i)
 			{
-				const PClass *wpn = Net_ReadWeapon(stream);
+				PClassWeapon *wpn = Net_ReadWeapon(stream);
 				players[pnum].weapons.AddSlot(slot, wpn, pnum == consoleplayer);
 			}
 		}
@@ -2645,7 +2641,7 @@ void Net_DoCommand (int type, BYTE **stream, int player)
 	case DEM_ADDSLOT:
 		{
 			int slot = ReadByte(stream);
-			const PClass *wpn = Net_ReadWeapon(stream);
+			PClassWeapon *wpn = Net_ReadWeapon(stream);
 			players[player].weapons.AddSlot(slot, wpn, player == consoleplayer);
 		}
 		break;
@@ -2653,14 +2649,14 @@ void Net_DoCommand (int type, BYTE **stream, int player)
 	case DEM_ADDSLOTDEFAULT:
 		{
 			int slot = ReadByte(stream);
-			const PClass *wpn = Net_ReadWeapon(stream);
+			PClassWeapon *wpn = Net_ReadWeapon(stream);
 			players[player].weapons.AddSlotDefault(slot, wpn, player == consoleplayer);
 		}
 		break;
 
 	case DEM_SETPITCHLIMIT:
-		players[player].MinPitch = ReadByte(stream) * -ANGLE_1;		// up
-		players[player].MaxPitch = ReadByte(stream) *  ANGLE_1;		// down
+		players[player].MinPitch = -(double)ReadByte(stream);		// up
+		players[player].MaxPitch = (double)ReadByte(stream);		// down
 		break;
 
 	case DEM_ADVANCEINTER:
@@ -2669,6 +2665,11 @@ void Net_DoCommand (int type, BYTE **stream, int player)
 
 	case DEM_REVERTCAMERA:
 		players[player].camera = players[player].mo;
+		break;
+
+	case DEM_FINISHGAME:
+		// Simulate an end-of-game action
+		G_ChangeLevel(NULL, 0, 0);
 		break;
 
 	default:
@@ -2741,9 +2742,12 @@ void Net_SkipCommand (int type, BYTE **stream)
 			skip = strlen ((char *)(*stream)) + 1;
 			break;
 
+		case DEM_WARPCHEAT:
+			skip = 6;
+			break;
+
 		case DEM_INVUSE:
 		case DEM_INVDROP:
-		case DEM_WARPCHEAT:
 			skip = 4;
 			break;
 
@@ -2797,7 +2801,7 @@ void Net_SkipCommand (int type, BYTE **stream)
 			break;
 
 		case DEM_RUNSPECIAL:
-			skip = 2 + *(*stream + 1) * 4;
+			skip = 3 + *(*stream + 2) * 4;
 			break;
 
 		case DEM_CONVREPLY:

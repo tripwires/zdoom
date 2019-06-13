@@ -51,6 +51,7 @@
 #include "r_data/r_translate.h"
 #include "templates.h"
 #include "gstrings.h"
+#include "cmdlib.h"
 
 // States for the intermission
 typedef enum
@@ -722,7 +723,7 @@ static int WI_DrawCharPatch (FFont *font, int charcode, int x, int y, EColorRang
 	int width;
 	screen->DrawTexture(font->GetChar(charcode, &width), x, y,
 		nomove ? DTA_CleanNoMove : DTA_Clean, true,
-		DTA_ShadowAlpha, (gameinfo.gametype & GAME_DoomChex) ? 0 : FRACUNIT/2,
+		DTA_ShadowAlpha, (gameinfo.gametype & GAME_DoomChex) ? 0 : OPAQUE/2,
 		DTA_Translation, font->GetColorTranslation(translation),
 		TAG_DONE);
 	return x - width;
@@ -759,7 +760,7 @@ int CheckRealHeight(FTexture *tex)
 		}
 	}
 	// Scale maxy before returning it
-	maxy = (maxy << 17) / tex->yScale;
+	maxy = int((maxy *2) / tex->Scale.Y);
 	maxy = (maxy >> 1) + (maxy & 1);
 	return maxy;
 }
@@ -1096,6 +1097,11 @@ void WI_End ()
 	}
 }
 
+bool WI_autoSkip()
+{
+	return wi_autoadvance > 0 && bcnt > (wi_autoadvance * TICRATE);
+}
+
 void WI_initNoState ()
 {
 	state = NoState;
@@ -1114,7 +1120,7 @@ void WI_updateNoState ()
 	else
 	{
 		bool noauto = noautostartmap;
-		bool autoskip = (wi_autoadvance > 0 && bcnt > (wi_autoadvance * TICRATE));
+		bool autoskip = WI_autoSkip();
 
 		for (int i = 0; !noauto && i < MAXPLAYERS; ++i)
 		{
@@ -1228,7 +1234,7 @@ void WI_initDeathmatchStats (void)
 	acceleratestage = 0;
 	memset(playerready, 0, sizeof(playerready));
 	memset(cnt_frags, 0, sizeof(cnt_frags));
-	memset(cnt_deaths, 0, sizeof(cnt_frags));
+	memset(cnt_deaths, 0, sizeof(cnt_deaths));
 	memset(player_deaths, 0, sizeof(player_deaths));
 	total_frags = 0;
 	total_deaths = 0;
@@ -1254,7 +1260,7 @@ void WI_updateDeathmatchStats ()
 
 	int i;
 	bool stillticking;
-	bool autoskip = (wi_autoadvance > 0 && bcnt > (wi_autoadvance * TICRATE));
+	bool autoskip = WI_autoSkip();
 
 	WI_updateAnimatedBack();
 
@@ -1506,7 +1512,7 @@ void WI_updateNetgameStats ()
 	int i;
 	int fsum;
 	bool stillticking;
-	bool autoskip = (wi_autoadvance > 0 && bcnt > (wi_autoadvance * TICRATE));
+	bool autoskip = WI_autoSkip();
 
 	WI_updateAnimatedBack ();
 

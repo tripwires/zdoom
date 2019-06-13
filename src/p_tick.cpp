@@ -21,7 +21,7 @@
 //
 //-----------------------------------------------------------------------------
 
-
+#include <float.h>
 #include "p_local.h"
 #include "p_effect.h"
 #include "c_console.h"
@@ -31,7 +31,10 @@
 #include "sbar.h"
 #include "r_data/r_interpolate.h"
 #include "i_sound.h"
+#include "d_player.h"
 #include "g_level.h"
+#include "r_utility.h"
+#include "p_spec.h"
 
 extern gamestate_t wipegamestate;
 
@@ -39,7 +42,7 @@ extern gamestate_t wipegamestate;
 //
 // P_CheckTickerPaused
 //
-// Returns true if the ticker should be paused. In that cause, it also
+// Returns true if the ticker should be paused. In that case, it also
 // pauses sound effects and possibly music. If the ticker should not be
 // paused, then it returns false but does not unpause anything.
 //
@@ -54,7 +57,7 @@ bool P_CheckTickerPaused ()
 			 ConsoleState == c_down || ConsoleState == c_falling)
 		 && !demoplayback
 		 && !demorecording
-		 && players[consoleplayer].viewz != 1
+		 && players[consoleplayer].viewz != NO_VALUE
 		 && wipegamestate == gamestate)
 	{
 		S_PauseSound (!(level.flags2 & LEVEL2_PAUSE_MUSIC_IN_MENUS), false);
@@ -84,7 +87,7 @@ void P_Ticker (void)
 	if (paused || P_CheckTickerPaused())
 		return;
 
-	P_NewPspriteTick();
+	DPSprite::NewTick();
 
 	// [RH] Frozen mode is only changed every 4 tics, to make it work with A_Tracer().
 	if ((level.time & 3) == 0)
@@ -109,14 +112,12 @@ void P_Ticker (void)
 		S_ResumeSound (false);
 
 	P_ResetSightCounters (false);
+	R_ClearInterpolationPath();
 
 	// Since things will be moving, it's okay to interpolate them in the renderer.
 	r_NoInterpolate = false;
 
-	if (!bglobal.freeze && !(level.flags2 & LEVEL2_FROZEN))
-	{
-		P_ThinkParticles ();	// [RH] make the particles think
-	}
+	P_ThinkParticles();	// [RH] make the particles think
 
 	for (i = 0; i<MAXPLAYERS; i++)
 		if (playeringame[i] &&

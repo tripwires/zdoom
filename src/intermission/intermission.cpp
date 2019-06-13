@@ -54,14 +54,16 @@
 
 FIntermissionDescriptorList IntermissionDescriptors;
 
-IMPLEMENT_CLASS(DIntermissionScreen)
-IMPLEMENT_CLASS(DIntermissionScreenFader)
-IMPLEMENT_CLASS(DIntermissionScreenText)
-IMPLEMENT_CLASS(DIntermissionScreenCast)
-IMPLEMENT_CLASS(DIntermissionScreenScroller)
-IMPLEMENT_POINTY_CLASS(DIntermissionController)
-	DECLARE_POINTER(mScreen)
-END_POINTERS
+IMPLEMENT_CLASS(DIntermissionScreen, false, false)
+IMPLEMENT_CLASS(DIntermissionScreenFader, false, false)
+IMPLEMENT_CLASS(DIntermissionScreenText, false, false)
+IMPLEMENT_CLASS(DIntermissionScreenCast, false, false)
+IMPLEMENT_CLASS(DIntermissionScreenScroller, false, false)
+IMPLEMENT_CLASS(DIntermissionController, false, true)
+
+IMPLEMENT_POINTERS_START(DIntermissionController)
+	IMPLEMENT_POINTER(mScreen)
+IMPLEMENT_POINTERS_END
 
 extern int		NoWipe;
 
@@ -109,7 +111,7 @@ void DIntermissionScreen::Init(FIntermissionAction *desc, bool first)
 	}
 	else if (*texname == '$')
 	{
-		texname = GStrings[texname+1];
+		texname = GStrings(texname+1);
 	}
 	if (texname[0] != 0)
 	{
@@ -262,7 +264,7 @@ void DIntermissionScreenFader::Drawer ()
 	{
 		double factor = clamp(double(mTicker) / mDuration, 0., 1.);
 		if (mType == FADE_In) factor = 1.0 - factor;
-		int color = MAKEARGB(xs_RoundToInt(factor*255), 0,0,0);
+		int color = MAKEARGB(int(factor*255), 0,0,0);
 
 		if (screen->Begin2D(false))
 		{
@@ -409,7 +411,7 @@ void DIntermissionScreenCast::Init(FIntermissionAction *desc, bool first)
 {
 	Super::Init(desc, first);
 	mName = static_cast<FIntermissionActionCast*>(desc)->mName;
-	mClass = PClass::FindClass(static_cast<FIntermissionActionCast*>(desc)->mCastClass);
+	mClass = PClass::FindActor(static_cast<FIntermissionActionCast*>(desc)->mCastClass);
 	if (mClass != NULL) mDefaults = GetDefaultByType(mClass);
 	else
 	{
@@ -463,7 +465,7 @@ int DIntermissionScreenCast::Responder (event_t *ev)
 	if (mClass != NULL)
 	{
 		FName label[] = {NAME_Death, NAME_Cast};
-		caststate = mClass->ActorInfo->FindState(2, label);
+		caststate = mClass->FindState(2, label);
 		if (caststate == NULL) return -1;
 
 		casttics = caststate->GetTics();
@@ -591,6 +593,8 @@ void DIntermissionScreenCast::Drawer ()
 	// draw the current frame in the middle of the screen
 	if (caststate != NULL)
 	{
+		DVector2 castscale = mDefaults->Scale;
+
 		int castsprite = caststate->sprite;
 
 		if (!(mDefaults->flags4 & MF4_NOSKIN) &&
@@ -604,7 +608,14 @@ void DIntermissionScreenCast::Drawer ()
 			{
 				if (PlayerClasses[i].Type == mClass)
 				{
-					castsprite = skins[players[consoleplayer].userinfo.GetSkin()].sprite;
+					FPlayerSkin *skin = &skins[players[consoleplayer].userinfo.GetSkin()];
+					castsprite = skin->sprite;
+
+					if (!(mDefaults->flags4 & MF4_NOSKIN))
+					{
+						castscale = skin->Scale;
+					}
+
 				}
 			}
 		}
@@ -615,6 +626,10 @@ void DIntermissionScreenCast::Drawer ()
 		screen->DrawTexture (pic, 160, 170,
 			DTA_320x200, true,
 			DTA_FlipX, sprframe->Flip & 1,
+			DTA_DestHeightF, pic->GetScaledHeightDouble() * castscale.Y,
+			DTA_DestWidthF, pic->GetScaledWidthDouble() * castscale.X,
+			DTA_RenderStyle, mDefaults->RenderStyle,
+			DTA_AlphaF, mDefaults->Alpha,
 			DTA_Translation, casttranslation,
 			TAG_DONE);
 	}
@@ -722,7 +737,10 @@ DIntermissionController::DIntermissionController(FIntermissionDescriptor *Desc, 
 	mScreen = NULL;
 	mFirst = true;
 	mGameState = state;
-	NextPage();
+
+	// If the intermission finishes straight away then cancel the wipe.
+	if(!NextPage())
+		wipegamestate = GS_FINALE;
 }
 
 bool DIntermissionController::NextPage ()

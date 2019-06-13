@@ -30,8 +30,6 @@
 ** THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 **---------------------------------------------------------------------------
 **
-** It might be a good idea to move these into files that they are more
-** closely related to, but right now, I am too lazy to do that.
 */
 
 #include <math.h>
@@ -71,6 +69,8 @@
 #include "v_text.h"
 #include "p_lnspec.h"
 #include "v_video.h"
+#include "r_utility.h"
+#include "r_data/r_interpolate.h"
 
 extern FILE *Logfile;
 extern bool insave;
@@ -458,9 +458,9 @@ CCMD (exec)
 	}
 }
 
-void execLogfile(const char *fn)
+void execLogfile(const char *fn, bool append)
 {
-	if ((Logfile = fopen(fn, "w")))
+	if ((Logfile = fopen(fn, append? "a" : "w")))
 	{
 		const char *timestr = myasctime();
 		Printf("Log started: %s\n", timestr);
@@ -484,7 +484,7 @@ CCMD (logfile)
 
 	if (argv.argc() >= 2)
 	{
-		execLogfile(argv[1]);
+		execLogfile(argv[1], argv.argc() >=3? !!argv[2]:false);
 	}
 }
 
@@ -605,7 +605,7 @@ CCMD (special)
 			}
 		}
 		Net_WriteByte(DEM_RUNSPECIAL);
-		Net_WriteByte(specnum);
+		Net_WriteWord(specnum);
 		Net_WriteByte(argc - 2);
 		for (int i = 2; i < argc; ++i)
 		{
@@ -777,15 +777,16 @@ CCMD (warp)
 		Printf ("You can only warp inside a level.\n");
 		return;
 	}
-	if (argv.argc() != 3)
+	if (argv.argc() < 3 || argv.argc() > 4)
 	{
-		Printf ("Usage: warp <x> <y>\n");
+		Printf ("Usage: warp <x> <y> [z]\n");
 	}
 	else
 	{
 		Net_WriteByte (DEM_WARPCHEAT);
 		Net_WriteWord (atoi (argv[1]));
 		Net_WriteWord (atoi (argv[2]));
+		Net_WriteWord (argv.argc() == 3 ? ONFLOORZ/65536 : atoi (argv[3]));
 	}
 }
 
@@ -810,7 +811,7 @@ CCMD (load)
 		return;
 	}
 	FString fname = argv[1];
-	DefaultExtension (fname, ".zds");
+	DefaultExtension (fname, "." SAVEGAME_EXT);
     G_LoadGame (fname);
 }
 
@@ -830,7 +831,7 @@ CCMD (save)
         return;
     }
     FString fname = argv[1];
-	DefaultExtension (fname, ".zds");
+	DefaultExtension (fname, "." SAVEGAME_EXT);
 	G_SaveGame (fname, argv.argc() > 2 ? argv[2] : argv[1]);
 }
 
@@ -871,16 +872,16 @@ CCMD (wdir)
 //-----------------------------------------------------------------------------
 CCMD(linetarget)
 {
-	AActor *linetarget;
+	FTranslatedLineTarget t;
 
 	if (CheckCheatmode () || players[consoleplayer].mo == NULL) return;
-	P_AimLineAttack(players[consoleplayer].mo,players[consoleplayer].mo->angle,MISSILERANGE, &linetarget, 0);
-	if (linetarget)
+	P_AimLineAttack(players[consoleplayer].mo,players[consoleplayer].mo->Angles.Yaw, MISSILERANGE, &t, 0.);
+	if (t.linetarget)
 	{
 		Printf("Target=%s, Health=%d, Spawnhealth=%d\n",
-			linetarget->GetClass()->TypeName.GetChars(),
-			linetarget->health,
-			linetarget->SpawnHealth());
+			t.linetarget->GetClass()->TypeName.GetChars(),
+			t.linetarget->health,
+			t.linetarget->SpawnHealth());
 	}
 	else Printf("No target found\n");
 }
@@ -888,21 +889,31 @@ CCMD(linetarget)
 // As linetarget, but also give info about non-shootable actors
 CCMD(info)
 {
-	AActor *linetarget;
+	FTranslatedLineTarget t;
 
 	if (CheckCheatmode () || players[consoleplayer].mo == NULL) return;
-	P_AimLineAttack(players[consoleplayer].mo,players[consoleplayer].mo->angle,MISSILERANGE, 
-		&linetarget, 0,	ALF_CHECKNONSHOOTABLE|ALF_FORCENOSMART);
-	if (linetarget)
+	P_AimLineAttack(players[consoleplayer].mo,players[consoleplayer].mo->Angles.Yaw, MISSILERANGE,
+		&t, 0.,	ALF_CHECKNONSHOOTABLE|ALF_FORCENOSMART);
+	if (t.linetarget)
 	{
 		Printf("Target=%s, Health=%d, Spawnhealth=%d\n",
-			linetarget->GetClass()->TypeName.GetChars(),
-			linetarget->health,
-			linetarget->SpawnHealth());
-		PrintMiscActorInfo(linetarget);
+			t.linetarget->GetClass()->TypeName.GetChars(),
+			t.linetarget->health,
+			t.linetarget->SpawnHealth());
+		PrintMiscActorInfo(t.linetarget);
 	}
 	else Printf("No target found. Info cannot find actors that have "
 				"the NOBLOCKMAP flag or have height/radius of 0.\n");
+}
+
+CCMD(myinfo)
+{
+	if (CheckCheatmode () || players[consoleplayer].mo == NULL) return;
+	Printf("Target=%s, Health=%d, Spawnhealth=%d\n",
+		players[consoleplayer].mo->GetClass()->TypeName.GetChars(),
+		players[consoleplayer].mo->health,
+		players[consoleplayer].mo->SpawnHealth());
+	PrintMiscActorInfo(players[consoleplayer].mo);
 }
 
 typedef bool (*ActorTypeChecker) (AActor *);
@@ -922,15 +933,26 @@ static bool IsActorACountItem(AActor *mo)
 	return mo->IsKindOf(RUNTIME_CLASS(AInventory)) && mo->flags&MF_SPECIAL && mo->flags&MF_COUNTITEM;
 }
 
-static void PrintFilteredActorList(const ActorTypeChecker IsActorType, const char *FilterName)
+// [SP] for all actors
+static bool IsActor(AActor *mo)
+{
+	if (mo->IsKindOf(RUNTIME_CLASS(AInventory)))
+		return static_cast<AInventory *>(mo)->Owner == NULL; // [SP] Exclude inventory-owned items
+	else
+		return true;
+}
+
+// [SP] modified - now allows showing count only, new arg must be passed. Also now still counts regardless, if lists are printed.
+static void PrintFilteredActorList(const ActorTypeChecker IsActorType, const char *FilterName, bool countOnly)
 {
 	AActor *mo;
 	const PClass *FilterClass = NULL;
+	int counter = 0;
 
 	if (FilterName != NULL)
 	{
-		FilterClass = PClass::FindClass(FilterName);
-		if (FilterClass == NULL || FilterClass->ActorInfo == NULL)
+		FilterClass = PClass::FindActor(FilterName);
+		if (FilterClass == NULL)
 		{
 			Printf("%s is not an actor class.\n", FilterName);
 			return;
@@ -942,11 +964,32 @@ static void PrintFilteredActorList(const ActorTypeChecker IsActorType, const cha
 	{
 		if ((FilterClass == NULL || mo->IsA(FilterClass)) && IsActorType(mo))
 		{
-			Printf ("%s at (%d,%d,%d)\n",
-				mo->GetClass()->TypeName.GetChars(),
-				mo->X() >> FRACBITS, mo->Y() >> FRACBITS, mo->Z() >> FRACBITS);
+			counter++;
+			if (!countOnly)
+				Printf ("%s at (%f,%f,%f)\n",
+					mo->GetClass()->TypeName.GetChars(), mo->X(), mo->Y(), mo->Z());
 		}
 	}
+	Printf("%i match(s) found.\n", counter);
+}
+
+//-----------------------------------------------------------------------------
+//
+//
+//
+//-----------------------------------------------------------------------------
+CCMD(actorlist) // [SP] print all actors (this can get quite big?)
+{
+	if (CheckCheatmode ()) return;
+
+	PrintFilteredActorList(IsActor, argv.argc() > 1 ? argv[1] : NULL, false);
+}
+
+CCMD(actornum) // [SP] count all actors
+{
+	if (CheckCheatmode ()) return;
+
+	PrintFilteredActorList(IsActor, argv.argc() > 1 ? argv[1] : NULL, true);
 }
 
 //-----------------------------------------------------------------------------
@@ -958,7 +1001,14 @@ CCMD(monster)
 {
 	if (CheckCheatmode ()) return;
 
-	PrintFilteredActorList(IsActorAMonster, argv.argc() > 1 ? argv[1] : NULL);
+	PrintFilteredActorList(IsActorAMonster, argv.argc() > 1 ? argv[1] : NULL, false);
+}
+
+CCMD(monsternum) // [SP] count monsters
+{
+	if (CheckCheatmode ()) return;
+
+	PrintFilteredActorList(IsActorAMonster, argv.argc() > 1 ? argv[1] : NULL, true);
 }
 
 //-----------------------------------------------------------------------------
@@ -970,7 +1020,14 @@ CCMD(items)
 {
 	if (CheckCheatmode ()) return;
 
-	PrintFilteredActorList(IsActorAnItem, argv.argc() > 1 ? argv[1] : NULL);
+	PrintFilteredActorList(IsActorAnItem, argv.argc() > 1 ? argv[1] : NULL, false);
+}
+
+CCMD(itemsnum) // [SP] # of any items
+{
+	if (CheckCheatmode ()) return;
+
+	PrintFilteredActorList(IsActorAnItem, argv.argc() > 1 ? argv[1] : NULL, true);
 }
 
 //-----------------------------------------------------------------------------
@@ -982,7 +1039,14 @@ CCMD(countitems)
 {
 	if (CheckCheatmode ()) return;
 
-	PrintFilteredActorList(IsActorACountItem, argv.argc() > 1 ? argv[1] : NULL);
+	PrintFilteredActorList(IsActorACountItem, argv.argc() > 1 ? argv[1] : NULL, false);
+}
+
+CCMD(countitemsnum) // [SP] # of counted items
+{
+	if (CheckCheatmode ()) return;
+
+	PrintFilteredActorList(IsActorACountItem, argv.argc() > 1 ? argv[1] : NULL, true);
 }
 
 //-----------------------------------------------------------------------------
@@ -1083,8 +1147,43 @@ CCMD(nextsecret)
 CCMD(currentpos)
 {
 	AActor *mo = players[consoleplayer].mo;
-	Printf("Current player position: (%1.3f,%1.3f,%1.3f), angle: %1.3f, floorheight: %1.3f, sector:%d, lightlevel: %d\n",
-		FIXED2FLOAT(mo->X()), FIXED2FLOAT(mo->Y()), FIXED2FLOAT(mo->Z()), mo->angle/float(ANGLE_1), FIXED2FLOAT(mo->floorz), mo->Sector->sectornum, mo->Sector->lightlevel);
+	if(mo)
+	{
+		Printf("Current player position: (%1.3f,%1.3f,%1.3f), angle: %1.3f, floorheight: %1.3f, sector:%d, lightlevel: %d\n",
+			mo->X(), mo->Y(), mo->Z(), mo->Angles.Yaw.Normalized360().Degrees, mo->floorz, mo->Sector->sectornum, mo->Sector->lightlevel);
+	}
+	else
+	{
+		Printf("You are not in game!\n");
+	}
+}
+
+//-----------------------------------------------------------------------------
+//
+//
+//
+//-----------------------------------------------------------------------------
+CCMD(vmengine)
+{
+	if (argv.argc() == 2)
+	{
+		if (stricmp(argv[1], "default") == 0)
+		{
+			VMSelectEngine(VMEngine_Default);
+			return;
+		}
+		else if (stricmp(argv[1], "checked") == 0)
+		{
+			VMSelectEngine(VMEngine_Checked);
+			return;
+		}
+		else if (stricmp(argv[1], "unchecked") == 0)
+		{
+			VMSelectEngine(VMEngine_Unchecked);
+			return;
+		}
+	}
+	Printf("Usage: vmengine <default|checked|unchecked>\n");
 }
 
 //-----------------------------------------------------------------------------
@@ -1201,5 +1300,18 @@ CCMD(secret)
 			}
 			else inlevel = false;
 		}
+	}
+}
+
+CCMD(angleconvtest)
+{
+	Printf("Testing degrees to angle conversion:\n");
+	for (double ang = -5 * 180.; ang < 5 * 180.; ang += 45.)
+	{
+		unsigned ang1 = DAngle(ang).BAMs();
+		unsigned ang2 = (unsigned)(ang * (0x40000000 / 90.));
+		unsigned ang3 = (unsigned)(int)(ang * (0x40000000 / 90.));
+		Printf("Angle = %.5f: xs_RoundToInt = %08x, unsigned cast = %08x, signed cast = %08x\n",
+			ang, ang1, ang2, ang3);
 	}
 }
